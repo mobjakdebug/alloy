@@ -1,14 +1,13 @@
-import marimo as mo
 import marimo._code_mode as cm
 from transformers import AutoTokenizer, DataCollatorForSeq2Seq, TrainingArguments
-from peft import LoraConfig
 
 g = cm.get_context().globals
+fn_g = g["run_phase2_round1_train"].__globals__
 tok = AutoTokenizer.from_pretrained("ornith-ai/Ornith-1.5-9B", trust_remote_code=True)
 if tok.pad_token is None:
     tok.pad_token = tok.eos_token
-anchors = g["_build_tool_call_anchors"](tok, count=4)
-print("TOOL_ANCHOR_SAMPLE:", anchors[0]["text"][:220])
+anchors = fn_g["_build_tool_call_anchors"](tok, count=4)
+print("TOOL_ANCHOR_SAMPLE:", anchors[0]["text"][:260])
 
 collator = DataCollatorForSeq2Seq(tok, pad_to_multiple_of=8, label_pad_token_id=-100)
 args = TrainingArguments(
@@ -36,3 +35,4 @@ args = TrainingArguments(
 )
 print("DRY_VALIDATE_ARGS: OK! bf16=", args.bf16, "warmup_steps=", args.warmup_steps)
 print("LAUNCHER:", g["get_alloy_job_status"]("phase2_auto_launcher", tail_lines=10))
+print("PHASE1_DISTILL:", g["get_alloy_job_status"]("phase1_distill", tail_lines=15))
