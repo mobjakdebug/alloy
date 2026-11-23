@@ -1,5 +1,7 @@
 import marimo._code_mode as cm
 ctx = cm.get_context()
-print("ALLOY_GATE_DIR in defs:", ctx.graph.definitions.get("ALLOY_GATE_DIR"))
-print("cells:", [(c.id, c.name) for c in ctx.cells])
-print("graph cells:", list(ctx.graph.cells.keys()))
+for c in ctx.cells:
+    if any(k in c.code for k in ["ALLOY_GATE_DIR", "build_frozen_gate", "run_phase0_train_smoke"]):
+        print("FOUND IN CELL:", c.id, c.name)
+print("defs keys sample:", sorted(list(ctx.graph.definitions.keys()))[:40])
+print("has ALLOY_GATE_DIR in globals:", "ALLOY_GATE_DIR" in ctx.globals)
