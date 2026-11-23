@@ -1,13 +1,16 @@
-import json, subprocess
-from pathlib import Path
-import marimo._code_mode as cm
-
-g = cm.get_context().globals
-print("BASELINE:", json.dumps(g["get_alloy_job_status"]("phase0_vllm_baseline", tail_lines=30), indent=2, ensure_ascii=False))
-print("GPU:", subprocess.check_output(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,power.draw", "--format=csv,noheader"]).decode().strip())
-res_p = Path("/marimo/alloy_gate/baseline_ornith_vllm.json")
-if res_p.exists():
-    d = json.loads(res_p.read_text(encoding="utf-8"))
-    print("FULL_METRICS:", json.dumps(d["metrics"], indent=2, ensure_ascii=False))
-    print("IDENTITY:", json.dumps(d["identity_probes"], indent=2, ensure_ascii=False))
-    print("TOOLS:", json.dumps(d["tool_probes"], indent=2, ensure_ascii=False))
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained("ornith-ai/Ornith-1.5-9B", trust_remote_code=True)
+print("=== TEMPLATE WITH <think> ===")
+print(repr(tok.apply_chat_template([
+    {"role": "user", "content": "Solve 1+1"},
+    {"role": "assistant", "content": "<think>\n1+1=2\n</think>\n\n2"}
+], tokenize=False, add_generation_prompt=False)))
+print("=== TEMPLATE WITHOUT <think> ===")
+print(repr(tok.apply_chat_template([
+    {"role": "user", "content": "Who are you?"},
+    {"role": "assistant", "content": "I'm Alloy, made by Mob AI."}
+], tokenize=False, add_generation_prompt=False)))
+print("=== GENERATION PROMPT ===")
+print(repr(tok.apply_chat_template([
+    {"role": "user", "content": "Who are you?"}
+], tokenize=False, add_generation_prompt=True)))
