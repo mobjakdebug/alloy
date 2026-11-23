@@ -35,22 +35,18 @@ mo.vstack([
 """.strip()
 
 async with cm.get_context() as ctx:
-    ctx.packages.add("peft", "accelerate", "trl", "bitsandbytes", "safetensors")
     for cid in list(ctx.cells.keys()):
         if ctx.cells[cid].name == "dataset_audit":
             ctx.delete_cell(cid)
+    # Re-run env_probe to verify newly installed packages, then create & run dataset_audit
+    for cid in list(ctx.cells.keys()):
+        if ctx.cells[cid].name == "env_probe":
+            ctx.run_cell(cid)
     last_cid = list(ctx.cells.keys())[-1]
     c7 = ctx.create_cell(CELL_DATASET_AUDIT, after=last_cid, name="dataset_audit", hide_code=False)
     ctx.run_cell(c7)
 
-for pkg_name in ("peft", "accelerate", "trl", "bitsandbytes", "safetensors"):
-    try:
-        import importlib.metadata as md
-        print(pkg_name, "==", md.version(pkg_name))
-    except Exception as e:
-        print(pkg_name, "ERR:", e)
-
 mo.status.toast(
-    title="Packages Installed & Datasets Audited!",
-    description="peft/trl/accelerate ready and HF datasets inspected.",
+    title="Training Stack Verified!",
+    description="Running live dataset audit in Molab now.",
 )
