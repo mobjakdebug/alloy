@@ -1,20 +1,24 @@
 import json
-from pathlib import Path
 import marimo._code_mode as cm
-from huggingface_hub import HfApi
+from datasets import load_dataset
+from huggingface_hub import hf_hub_download
+import pyarrow.parquet as pq
 
 g = cm.get_context().globals
 print("JOB:", json.dumps(g["get_alloy_job_status"]("phase0_konkur_baseline", tail_lines=30), indent=2, ensure_ascii=False))
 
-audit_p = Path("/marimo/alloy_gate/dataset_deep_audit.json")
-if audit_p.exists():
-    print("DEEP_AUDIT:", audit_p.read_text(encoding="utf-8")[:6000])
-
-api = HfApi()
-for repo in ["nvidia/OpenCodeReasoning", "ZehuaZhao/SUPERChem", "ScienceOne-AI/PhysLogic", "xmanii/Persian-Math-SFT", "huginnfork/Qwen3.8-27B-FP8"]:
+# Quick CPU-only inspection of OpenCodeReasoning, Persian-Math-SFT, SUPERChem, PhysLogic
+for name, repo, fpath in [
+    ("OpenCodeReasoning", "nvidia/OpenCodeReasoning", "split_0/train-00000-of-00030.parquet"),
+    ("Persian-Math-SFT", "xmanii/Persian-Math-SFT", "data/train-00000-of-00001.parquet"),
+    ("SUPERChem", "ZehuaZhao/SUPERChem", "SUPERChem-500.parquet"),
+    ("PhysLogic", "ScienceOne-AI/PhysLogic", "data/test.parquet"),
+]:
     try:
-        info = api.repo_info(repo_id=repo, repo_type="model" if "Qwen3.8" in repo else "dataset", files_metadata=True)
-        files = [(s.rfilename, round((s.size or 0)/(1024**3), 3)) for s in (info.siblings or []) if (s.size or 0) > 1_000_000]
-        print(f"HF_INFO {repo}: total_files={len(info.siblings or [])}, large_files={files[:12]}")
+        p = hf_hub_download(repo_id=repo, filename=fpath, repo_type="dataset")
+        t = pq.read_table(p)
+        row0 = {k: (str(v)[:180] if v is not None else None) for k, v in t.slice(0, 1).to_pylist()[0].items()}
+        print(f"\n=== {name} ({repo}) rows_in_file={t.num_rows} cols={t.column_names} ===")
+        print("sample0:", row0)
     except Exception as e:
-        print(f"HF_INFO {repo} ERR: {e}")
+        print(f"\n=== {name} ERR: {e} ===")
