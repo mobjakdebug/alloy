@@ -1,6 +1,9 @@
 import marimo._code_mode as cm
-ctx = cm.get_context()
-print("cells:", [(c.id, c.name) for c in ctx.cells])
-print("multiply_defined:", ctx.graph.get_multiply_defined())
-for k in ["ALLOY_GATE_DIR", "ALLOY_DATA_DIR", "build_frozen_gate", "run_phase0_train_smoke"]:
-    print(k, "-> defs:", ctx.graph.definitions.get(k), "defining_cells:", ctx.graph.get_defining_cells(k))
+from pathlib import Path
+p = Path("/usr/local/lib/python3.13/site-packages/marimo/_code_mode/_context.py")
+lines = p.read_text().splitlines()
+for i in range(795, 860):
+    print(f"{i+1}: {lines[i]}")
+print("---")
+for i in range(1620, 1665):
+    print(f"{i+1}: {lines[i]}")
