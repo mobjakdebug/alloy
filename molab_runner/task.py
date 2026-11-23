@@ -1,24 +1,41 @@
-import ctypes, subprocess, threading, time, gc, torch
+import subprocess
+import marimo as mo
 import marimo._code_mode as cm
+
+async with cm.get_context() as ctx:
+    ctx.packages.add(["flash-linear-attention", "liger-kernel"])
 
 g = cm.get_context().globals
 
-# 1. Gracefully interrupt the slow eager-HF phase0_konkur_baseline thread
-for t in threading.enumerate():
-    if t.name == "alloy-phase0_konkur_baseline" and t.is_alive():
-        res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_ulong(t.ident), ctypes.py_object(RuntimeError)
-        )
-        print("Sent RuntimeError to alloy-phase0_konkur_baseline, res=", res)
-        t.join(timeout=5)
-        print("Thread alive after join(5):", t.is_alive())
+def _setup_vllm_venv(log):
+    log("Checking disk space...")
+    df_out = subprocess.check_output(["df", "-h", "/", "/marimo", "/tmp"], text=True)
+    log(df_out.strip())
+    venv_dir = "/marimo/vllm_venv"
+    log(f"Creating isolated vLLM venv at {venv_dir}...")
+    r1 = subprocess.run(["uv", "venv", venv_dir, "--python", "3.13"], capture_output=True, text=True)
+    log(f"uv venv rc={r1.returncode} {r1.stderr.strip()}")
+    if r1.returncode != 0:
+        raise RuntimeError(r1.stderr)
+    log("Installing vllm into /marimo/vllm_venv...")
+    r2 = subprocess.run(
+        ["uv", "pip", "install", "--python", f"{venv_dir}/bin/python", "vllm", "huggingface_hub"],
+        capture_output=True, text=True
+    )
+    log(f"uv pip install vllm rc={r2.returncode}")
+    if r2.returncode != 0:
+        log(r2.stderr[-2000:])
+        raise RuntimeError(r2.stderr[-1000:])
+    r3 = subprocess.run(
+        [f"{venv_dir}/bin/python", "-c", "import vllm, torch, transformers; print('vllm:', vllm.__version__, 'torch:', torch.__version__, 'transformers:', transformers.__version__, 'cuda:', torch.cuda.is_available())"],
+        capture_output=True, text=True
+    )
+    log(f"Verify vllm rc={r3.returncode}: {r3.stdout.strip()} {r3.stderr.strip()}")
+    return {"vllm_python": f"{venv_dir}/bin/python", "verify": r3.stdout.strip()}
 
-gc.collect()
-torch.cuda.empty_cache()
-print("GPU after cancel:", subprocess.check_output(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,power.draw", "--format=csv,noheader"]).decode().strip())
-
-# 2. Check full dry-run install plans (make sure torch/transformers won't be downgraded/broken)
-for pkg in ["flash-linear-attention", "causal-conv1d", "liger-kernel", "vllm"]:
-    r = subprocess.run(["uv", "pip", "install", "--dry-run", pkg], capture_output=True, text=True)
-    print(f"\n=== DRY_RUN {pkg} rc={r.returncode} ===")
-    print((r.stdout + "\n" + r.stderr)[-2000:])
+msg = g["start_alloy_job"]("setup_vllm_env", _setup_vllm_venv)
+print("START_MSG:", msg)
+mo.status.toast(
+    title="Installing Fast Inference (vLLM + FLA + Liger)!",
+    description="Setting up isolated /marimo/vllm_venv for 20x faster eval & distillation.",
+)
