@@ -2,12 +2,12 @@ import marimo as mo
 import marimo._code_mode as cm
 
 CELL_PHASE0_GATE_AND_EVAL = """
-ALLOY_GATE_DIR = Path("/marimo/alloy_gate")
-ALLOY_GATE_DIR.mkdir(parents=True, exist_ok=True)
-ALLOY_DATA_DIR = Path("/marimo/alloy_data")
-ALLOY_DATA_DIR.mkdir(parents=True, exist_ok=True)
+ALLOY_GATE_ROOT = Path("/marimo/alloy_gate")
+ALLOY_GATE_ROOT.mkdir(parents=True, exist_ok=True)
+ALLOY_DATA_ROOT = Path("/marimo/alloy_data")
+ALLOY_DATA_ROOT.mkdir(parents=True, exist_ok=True)
 
-def _patch_transformers_accelerate():
+def patch_transformers_accelerate():
     for _m in list(sys.modules.values()):
         if _m is not None and getattr(_m, "__name__", "").startswith("transformers"):
             if hasattr(_m, "is_accelerate_available"):
@@ -15,7 +15,7 @@ def _patch_transformers_accelerate():
             if hasattr(_m, "_accelerate_available"):
                 setattr(_m, "_accelerate_available", True)
 
-def build_frozen_gate(log, konkur_limit: int = 250):
+def build_frozen_gate_v2(log, konkur_limit: int = 250):
     from datasets import load_dataset
     log("Loading PersianML/persian-konkur-1404...")
     _ds = load_dataset("PersianML/persian-konkur-1404", split="train")
@@ -65,10 +65,10 @@ def build_frozen_gate(log, konkur_limit: int = 250):
             "Call `edit_file` on `src/app.py` to replace `x = 1` with `x = 2`.",
         ],
     }
-    (ALLOY_GATE_DIR / "frozen_gate.json").write_text(
+    (ALLOY_GATE_ROOT / "frozen_gate.json").write_text(
         json.dumps(_gate, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    (ALLOY_GATE_DIR / "konkur_text_only_full.json").write_text(
+    (ALLOY_GATE_ROOT / "konkur_text_only_full.json").write_text(
         json.dumps(_text_only, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     log(f"Saved frozen_gate.json ({len(_fast_gate)} items) & konkur_text_only_full.json ({len(_text_only)} items)")
@@ -79,9 +79,9 @@ def build_frozen_gate(log, konkur_limit: int = 250):
         "exam_names": {k: len(v) for k, v in _by_exam.items()},
     }
 
-def run_phase0_train_smoke(log, model_id: str, hf_org: str = "", hf_token: str = ""):
+def run_phase0_train_smoke_v2(log, model_id: str, hf_org: str = "", hf_token: str = ""):
     import gc
-    _patch_transformers_accelerate()
+    patch_transformers_accelerate()
     from datasets import Dataset
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForImageTextToText, AutoTokenizer, TrainerCallback
@@ -215,12 +215,12 @@ def _extract_konkur_choice(text: str):
 
 def run_phase0_konkur_baseline(log, model_id: str, limit: int = 60, batch_size: int = 8):
     import gc
-    _patch_transformers_accelerate()
+    patch_transformers_accelerate()
     from transformers import AutoModelForImageTextToText, AutoTokenizer
 
-    _gate_file = ALLOY_GATE_DIR / "frozen_gate.json"
+    _gate_file = ALLOY_GATE_ROOT / "frozen_gate.json"
     if not _gate_file.exists():
-        build_frozen_gate(log, konkur_limit=250)
+        build_frozen_gate_v2(log, konkur_limit=250)
     _gate = json.loads(_gate_file.read_text(encoding="utf-8"))
     _items = _gate["konkur_gate"][:limit]
 
@@ -235,7 +235,6 @@ def run_phase0_konkur_baseline(log, model_id: str, limit: int = 60, batch_size: 
     ).to("cuda:0")
     _model.eval()
 
-    # 1. Identity & tool probes
     _id_results = []
     _id_prompts = [
         _tok.apply_chat_template([{"role": "user", "content": p["prompt"]}], tokenize=False, add_generation_prompt=True)
@@ -290,7 +289,6 @@ def run_phase0_konkur_baseline(log, model_id: str, limit: int = 60, batch_size: 
         _tool_results.append({"prompt": _tp, "response": _r[:350]})
     log(f"Evaluated {len(_tool_results)} tool-call probes.")
 
-    # 2. Konkur 1404 stratified baseline
     _correct = 0
     _parsed = 0
     _by_exam = {}
@@ -350,7 +348,7 @@ def run_phase0_konkur_baseline(log, model_id: str, limit: int = 60, batch_size: 
         "tool_probes": _tool_results,
         "results": _results,
     }
-    (ALLOY_GATE_DIR / "baseline_konkur.json").write_text(
+    (ALLOY_GATE_ROOT / "baseline_konkur.json").write_text(
         json.dumps(_summary, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     del _model
@@ -375,7 +373,7 @@ async with cm.get_context() as ctx:
 
 g = cm.get_context().globals
 def _run_gate_and_baseline(log, model_id):
-    _gate_stats = g["build_frozen_gate"](log, konkur_limit=250)
+    _gate_stats = g["build_frozen_gate_v2"](log, konkur_limit=250)
     _eval_stats = g["run_phase0_konkur_baseline"](log, model_id=model_id, limit=60, batch_size=8)
     return {"gate": _gate_stats, "konkur_baseline": _eval_stats}
 
