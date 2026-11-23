@@ -11,7 +11,10 @@ on:
     branches:
       - "arena/**"
     paths:
-      - "molab_runner/**"
+      - "molab_runner/task.py"
+
+permissions:
+  contents: write
 
 jobs:
   run-molab-task:
@@ -41,11 +44,47 @@ jobs:
           git clone --depth 1 https://github.com/marimo-team/marimo-pair.git /tmp/marimo-pair
 
       - name: Execute in Molab kernel
+        id: exec
         env:
           MOLAB_URL: ${{ secrets.MOLAB_URL }}
           MARIMO_TOKEN: ${{ secrets.MOLAB_TOKEN }}
           SCRIPT_PATH: ${{ github.event.inputs.script_path || 'molab_runner/task.py' }}
         run: |
+          set +e
           bash /tmp/marimo-pair/skills/marimo-pair/scripts/execute-code.sh \
             --url "$MOLAB_URL" \
-            "$SCRIPT_PATH"
+            "$SCRIPT_PATH" > raw_output.log 2>&1
+          rc=$?
+          set -e
+          python3 - <<'PY'
+          import os, pathlib
+          txt = pathlib.Path("raw_output.log").read_text(errors="replace")
+          for key in ("MARIMO_TOKEN", "MOLAB_URL"):
+              val = os.environ.get(key, "")
+              if val:
+                  txt = txt.replace(val, f"[REDACTED_{key}]")
+          pathlib.Path("clean_output.log").write_text(txt)
+          print(txt)
+          PY
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Post execution output as commit comment
+        if: always() && hashFiles('clean_output.log') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXEC_RC: ${{ steps.exec.outputs.exit_code }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          txt = pathlib.Path("clean_output.log").read_text(errors="replace")
+          if len(txt) > 60000:
+              txt = txt[:30000] + "\n\n... [TRUNCATED] ...\n\n" + txt[-30000:]
+          rc = os.environ.get("EXEC_RC", "?")
+          body = f"**Molab Pair Runner** (exit_code={rc})\n\n```text\n{txt}\n```"
+          subprocess.run([
+              "gh", "api",
+              f"repos/{os.environ['GITHUB_REPOSITORY']}/commits/{os.environ['GITHUB_SHA']}/comments",
+              "-f", f"body={body}",
+          ], check=True)
+          PY
