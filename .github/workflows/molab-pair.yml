@@ -1,0 +1,51 @@
+name: Molab Pair Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      script_path:
+        description: "Path to Python script to run in Molab scratchpad"
+        required: false
+        default: "molab_runner/task.py"
+  push:
+    branches:
+      - "arena/**"
+    paths:
+      - "molab_runner/**"
+
+jobs:
+  run-molab-task:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check secrets & runner script
+        env:
+          MOLAB_URL: ${{ secrets.MOLAB_URL }}
+          MOLAB_TOKEN: ${{ secrets.MOLAB_TOKEN }}
+          SCRIPT_PATH: ${{ github.event.inputs.script_path || 'molab_runner/task.py' }}
+        run: |
+          if [ -z "$MOLAB_URL" ] || [ -z "$MOLAB_TOKEN" ]; then
+            echo "::error::Missing MOLAB_URL or MOLAB_TOKEN GitHub Actions secret."
+            echo "Add MOLAB_URL and MOLAB_TOKEN in Repo Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          if [ ! -f "$SCRIPT_PATH" ]; then
+            echo "::error::Runner script not found: $SCRIPT_PATH"
+            exit 1
+          fi
+
+      - name: Fetch marimo-pair skill
+        run: |
+          git clone --depth 1 https://github.com/marimo-team/marimo-pair.git /tmp/marimo-pair
+
+      - name: Execute in Molab kernel
+        env:
+          MOLAB_URL: ${{ secrets.MOLAB_URL }}
+          MARIMO_TOKEN: ${{ secrets.MOLAB_TOKEN }}
+          SCRIPT_PATH: ${{ github.event.inputs.script_path || 'molab_runner/task.py' }}
+        run: |
+          bash /tmp/marimo-pair/skills/marimo-pair/scripts/execute-code.sh \
+            --url "$MOLAB_URL" \
+            "$SCRIPT_PATH"
