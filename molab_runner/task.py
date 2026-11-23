@@ -1,22 +1,56 @@
-import json
-import subprocess
+import marimo as mo
 import marimo._code_mode as cm
 
-print("--- DF ---")
-print(subprocess.check_output(["df", "-h", "/", "/marimo", "/tmp"], text=True))
+CELL_DATASET_AUDIT = """
+def _audit_hf_datasets():
+    from datasets import load_dataset
+    _report = {}
 
-print("--- LS /marimo ---")
-print(subprocess.check_output(["ls", "-la", "/marimo"], text=True))
+    _specs = [
+        ("PersianML/persian-konkur-1404", None, "train"),
+        ("nvidia/OpenScienceReasoning-2", None, "train"),
+        ("nebius/SWE-rebench-V2", None, "train"),
+        ("amiralifirouzi/Persian-SFT-102K", "fa", "train"),
+        ("BytedTsinghua-SIA/DAPO-Math-17k", None, "train"),
+    ]
+    for _name, _cfg, _split in _specs:
+        try:
+            _ds = load_dataset(_name, _cfg, split=_split, streaming=True)
+            _first = next(iter(_ds))
+            _preview = {}
+            for _k, _v in _first.items():
+                _s = str(_v)
+                _preview[_k] = _s[:180] + ("..." if len(_s) > 180 else "")
+            _report[_name] = {"status": "ok", "columns": list(_first.keys()), "sample": _preview}
+        except Exception as _e:
+            _report[_name] = {"status": "error", "error": str(_e)[:300]}
+    return _report
 
-ctx = cm.get_context()
-print("--- ctx.packages ---")
-help(ctx.packages)
+dataset_audit = _audit_hf_datasets()
+print("DATASET_AUDIT:", json.dumps(dataset_audit, indent=2, ensure_ascii=False))
+mo.vstack([
+    mo.md("### 5. Live Dataset Schema & Sample Audit (Streaming)"),
+    mo.json(dataset_audit),
+])
+""".strip()
 
-from transformers import AutoConfig
-for mid in ["ornith-ai/Ornith-1.5-9B", "Qwen/Qwen3.8-27B"]:
+async with cm.get_context() as ctx:
+    ctx.packages.add("peft", "accelerate", "trl", "bitsandbytes", "safetensors")
+    for cid in list(ctx.cells.keys()):
+        if ctx.cells[cid].name == "dataset_audit":
+            ctx.delete_cell(cid)
+    last_cid = list(ctx.cells.keys())[-1]
+    c7 = ctx.create_cell(CELL_DATASET_AUDIT, after=last_cid, name="dataset_audit", hide_code=False)
+    ctx.run_cell(c7)
+
+for pkg_name in ("peft", "accelerate", "trl", "bitsandbytes", "safetensors"):
     try:
-        cfg = AutoConfig.from_pretrained(mid, trust_remote_code=True)
-        tcfg = getattr(cfg, "text_config", cfg)
-        print(mid, "->", cfg.model_type, "layers:", getattr(tcfg, "num_hidden_layers", None), "hidden:", getattr(tcfg, "hidden_size", None))
+        import importlib.metadata as md
+        print(pkg_name, "==", md.version(pkg_name))
     except Exception as e:
-        print(mid, "ERR:", e)
+        print(pkg_name, "ERR:", e)
+
+mo.status.toast(
+    title="Packages Installed & Datasets Audited!",
+    description="peft/trl/accelerate ready and HF datasets inspected.",
+)
