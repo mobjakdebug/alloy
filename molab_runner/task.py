@@ -3,14 +3,26 @@ from pathlib import Path
 import marimo._code_mode as cm
 
 async with cm.get_context() as ctx:
-    for name in ["imports", "config_ui"]:
-        for c in ctx.cells:
-            if c.name == name:
-                ctx.run_cell(c.id)
+    for c in ctx.cells:
+        if c.name == "config_ui":
+            code = ctx.get_cell_code(c.id) if hasattr(ctx, "get_cell_code") else getattr(c, "code", "")
+            for line in code.splitlines():
+                if "=" in line and ("hf_" in line or "org" in line or "tok" in line):
+                    lhs = line.split("=")[0].strip()
+                    print("CFG_LHS:", lhs)
+            ctx.run_cell(c.id)
 
 g = cm.get_context().globals
-tok = g["hf_tok_in"].value
-org = g["hf_org_in"].value
+print("GLOBALS_AFTER:", sorted(k for k in g.keys() if "hf" in k.lower() or "org" in k.lower() or "tok" in k.lower()))
+
+tok = None
+org = "officialmobai"
+for k, v in g.items():
+    val = getattr(v, "value", v)
+    if isinstance(val, str) and val.startswith("hf_"):
+        tok = val
+    elif isinstance(val, str) and "officialmobai" in val:
+        org = val
 print("HF_ORG:", org, "HAS_TOK:", bool(tok))
 
 from huggingface_hub import HfApi
