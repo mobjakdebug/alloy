@@ -1,36 +1,29 @@
 import json, os
 from pathlib import Path
 import marimo._code_mode as cm
-from huggingface_hub import HfApi, login
+from huggingface_hub import hf_hub_download
 
 g = cm.get_context().globals
-org = (getattr(g.get("hf_org_ui"), "value", "") or "officialmobai").strip()
-tok = (getattr(g.get("hf_token_ui"), "value", "") or "").strip()
+tok = Path("/marimo/.config/hf_token").read_text().strip()
+org = "officialmobai"
+os.environ["HF_TOKEN"] = tok
+os.environ["HUGGINGFACE_HUB_TOKEN"] = tok
 
-print("ORG:", org, "HAS_TOK:", bool(tok), "TOK_LEN:", len(tok))
-if not tok:
-    for p in [Path("/marimo/.config/hf_token"), Path.home() / ".cache/huggingface/token"]:
-        if p.exists() and p.read_text().strip():
-            tok = p.read_text().strip()
-            print("LOADED_FALLBACK_TOK_FROM:", p)
-            break
+# 1. Restore frozen_gate.json and baseline_ornith_vllm.json from officialmobai/alloy-evals
+gate_dir = Path("/marimo/alloy_gate")
+gate_dir.mkdir(parents=True, exist_ok=True)
+fg = hf_hub_download(repo_id=f"{org}/alloy-evals", filename="gates/frozen_gate.json", repo_type="dataset", token=tok)
+(gate_dir / "frozen_gate.json").write_bytes(Path(fg).read_bytes())
+bg = hf_hub_download(repo_id=f"{org}/alloy-evals", filename="results/baseline_ornith_vllm.json", repo_type="dataset", token=tok)
+(gate_dir / "baseline_ornith_vllm.json").write_bytes(Path(bg).read_bytes())
+print("RESTORED frozen_gate.json bytes:", (gate_dir / "frozen_gate.json").stat().st_size)
 
-if tok:
-    Path("/marimo/.config").mkdir(parents=True, exist_ok=True)
-    p_tok = Path("/marimo/.config/hf_token")
-    p_tok.write_text(tok)
-    os.chmod(p_tok, 0o600)
-    os.environ["HF_TOKEN"] = tok
-    os.environ["HUGGINGFACE_HUB_TOKEN"] = tok
-    login(token=tok, add_to_git_credential=False)
-    api = HfApi(token=tok)
-    for repo, rtype in [(f"{org}/alloy-data", "dataset"), (f"{org}/alloy-evals", "dataset"), (f"{org}/Alloy-9B-checkpoints", "model")]:
-        try:
-            files = api.list_repo_files(repo_id=repo, repo_type=rtype)
-            print(f"HF {repo} ({rtype}):", files)
-        except Exception as e:
-            print(f"HF {repo} ERR:", e)
-else:
-    print("NO_TOKEN_FOUND_IN_UI_YET")
+# 2. Inspect phase1_distill.py CLI flags and phase1_dataset_pool code
+p1_script = Path("/marimo/alloy_scripts/phase1_distill.py").read_text()
+for line in p1_script.splitlines():
+    if "add_argument" in line or "ANCHOR_" in line or "PROBE_" in line or "TEACHER_" in line or "QUOTA" in line or "TARGET" in line or "max_tokens" in line:
+        print("P1_LINE:", line.strip())
 
-print("SETUP_JOB:", json.dumps(g["get_alloy_job_status"]("setup_vllm_and_cache", tail_lines=15), indent=2))
+# 3. Launch phase1_pool_prep right now!
+msg = g["start_alloy_job"]("phase1_pool_prep", g["build_phase1_raw_pools"], hf_token=tok)
+print("POOL_PREP_JOB:", msg)
