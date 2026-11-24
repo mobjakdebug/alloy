@@ -1,23 +1,24 @@
-import re
+import os, subprocess
 from pathlib import Path
 import marimo._code_mode as cm
 
-def mask(s):
-    return re.sub(r"hf_[A-Za-z0-9]{6,}", "hf_***REDACTED***", s)
+for envk in sorted(os.environ.keys()):
+    if any(w in envk.upper() for w in ["HF", "HUGGING", "TOKEN", "MARIMO", "MOLAB"]):
+        print("ENV_KEY:", envk, "len=", len(os.environ[envk]))
 
+for p in [Path.home() / ".cache/huggingface/token", Path("/root/.cache/huggingface/token"), Path("/marimo/.cache/huggingface/token"), Path("/marimo/vllm_venv")]:
+    print("CHECK_PATH:", p, p.exists())
+    if p.exists() and p.is_dir():
+        print("  SUB:", [x.name for x in list(p.iterdir())[:20]])
+
+# Run all core notebook cells cleanly so functions are loaded in kernel
 async with cm.get_context() as ctx:
-    for c in ctx.cells:
-        if c.name == "config_ui":
-            code = ctx.get_cell_code(c.id) if hasattr(ctx, "get_cell_code") else getattr(c, "code", "")
-            print("=== config_ui ===")
-            print(mask(code))
-            ctx.run_cell(c.id)
+    order = ["imports", "header", "env_probe", "config_ui", "guard_helpers", "job_manager", "vllm_gate_and_eval", "phase1_dataset_pool", "phase1_distill", "phase2_train_round1", "phase2_live_dashboard"]
+    by_name = {c.name: c.id for c in ctx.cells}
+    for nm in order:
+        if nm in by_name:
+            ctx.run_cell(by_name[nm])
+            print("RAN_CELL:", nm)
 
-g = cm.get_context().globals
-for k in ["hf_org_ui", "hf_token_ui"]:
-    obj = g.get(k)
-    val = getattr(obj, "value", obj)
-    print(k, "type=", type(obj), "val_len=", len(str(val or "")), "val_masked=", mask(str(val or "")))
-
-for p in Path("/marimo").iterdir():
-    print("MARIMO:", p.name, p.is_dir())
+# Check if vllm_venv can be built cleanly in background right now
+print("CELLS_LOADED_OK")
