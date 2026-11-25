@@ -94,6 +94,7 @@ def main():
     total_gen_toks = sum(len(o.outputs[0].token_ids) for o in outputs)
 
     id_res, tool_res, detailed = [], [], []
+    id_ok, tool_ok = 0, 0
     stats = {
         "konkur": {"total": 0, "correct": 0, "parsed": 0, "truncated": 0},
         "physlogic": {"total": 0, "correct": 0, "parsed": 0, "truncated": 0},
@@ -105,9 +106,13 @@ def main():
         ntoks = len(out.outputs[0].token_ids)
         is_trunc = ntoks >= args.max_tokens
         if kind == "identity":
-            id_res.append({"lang": item["lang"], "prompt": item["prompt"], "response": txt[:400]})
+            ok_id = ("alloy" in txt.lower() and "mob ai" in txt.lower())
+            id_ok += int(ok_id)
+            id_res.append({"lang": item["lang"], "prompt": item["prompt"], "ok": ok_id, "response": txt[:800]})
         elif kind == "tool":
-            tool_res.append({"prompt": item, "response": txt[:400]})
+            ok_tl = ("<tool_call>" in txt and "</tool_call>" in txt)
+            tool_ok += int(ok_tl)
+            tool_res.append({"prompt": item, "ok": ok_tl, "response": txt[:1200]})
         elif kind == "konkur":
             pred = extract_choice_or_boxed(txt, "1-4")
             ok = (pred == str(item["gold"]).strip())
@@ -141,9 +146,6 @@ def main():
         t = max(1, stats[k]["total"])
         stats[k]["accuracy_pct"] = round(100.0 * stats[k]["correct"] / t, 2)
         stats[k]["parsed_pct"] = round(100.0 * stats[k]["parsed"] / t, 2)
-
-    id_ok = sum(1 for p in id_res if "alloy" in p["response"].lower() and "mob ai" in p["response"].lower())
-    tool_ok = sum(1 for p in tool_res if "<tool_call>" in p["response"] and "</tool_call>" in p["response"])
 
     summary = {
         "model": args.model,

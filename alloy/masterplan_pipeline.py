@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-PHASE1_R2_SCRIPT = r'''import argparse, json, random, re, time
+PHASE1_R2_SCRIPT = r'''import argparse, json, random, re, sys, time
 from pathlib import Path
-from datasets import load_dataset
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
+
+REPO_DIR = Path("/marimo/alloy_repo")
+if REPO_DIR.exists() and str(REPO_DIR) not in sys.path:
+    sys.path.insert(0, str(REPO_DIR))
+
+from alloy.verifiers import answers_match, extract_boxed_or_final, norm_digits
 
 HESITATION_PATTERNS = [
     r"(?:^|[\s\n.!?;:—-])wait[,.\s!:—-]",
@@ -30,9 +35,6 @@ HESITATION_PATTERNS = [
 HESITATION_RE = re.compile("|".join(HESITATION_PATTERNS), re.IGNORECASE | re.MULTILINE)
 DIGITS_MAP = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
-def norm_digits(s: str) -> str:
-    return (s or "").translate(DIGITS_MAP)
-
 def ensure_think_tags(txt: str) -> str:
     t = (txt or "").strip()
     if "</think>" in t and "<think>" not in t:
@@ -53,48 +55,6 @@ def passes_zero_hesitation(txt: str, tok, max_tokens: int = 2800) -> tuple[bool,
         return False, n
     return True, n
 
-def extract_boxed_or_final(txt: str):
-    t = norm_digits(txt)
-    if "</think>" not in t:
-        return None
-    ans = t.split("</think>")[-1].strip()
-    if not ans:
-        return None
-    m = re.findall(r"\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}", ans)
-    if m:
-        return m[-1].strip()
-    m2 = re.findall(r"(?:Answer|answer|پاسخ|جواب|گزینه)\s*[:\-]?\s*\**([A-E1-4])\**", ans)
-    if m2:
-        return m2[-1].strip()
-    return None
-
-def answers_match(pred: str, gold: str) -> bool:
-    if not pred or not gold:
-        return False
-    p = norm_digits(pred).strip().strip("$").strip()
-    g = norm_digits(gold).strip().strip("$").strip()
-    p = re.sub(r"^\\text\{(.*)\}$", r"\1", p).strip()
-    g = re.sub(r"^\\text\{(.*)\}$", r"\1", g).strip()
-    if p.lower() == g.lower():
-        return True
-    p_ns, g_ns = re.sub(r"\s+", "", p), re.sub(r"\s+", "", g)
-    if p_ns.lower() == g_ns.lower():
-        return True
-    try:
-        fp, fg = float(p_ns.replace(",", "")), float(g_ns.replace(",", ""))
-        if abs(fp - fg) <= 1e-4 * max(1.0, abs(fg)):
-            return True
-    except Exception:
-        pass
-    try:
-        from sympy import simplify
-        from sympy.parsing.latex import parse_latex
-        if simplify(parse_latex(p) - parse_latex(g)) == 0:
-            return True
-    except Exception:
-        pass
-    return False
-
 def load_jsonl(p: Path):
     if not p.exists():
         return []
@@ -110,6 +70,7 @@ def build_extended_stem_pool(pool_dir: Path, gate_dir: Path):
     out_p = pool_dir / "nemotron_science_verifiable.jsonl"
     if out_p.exists() and out_p.stat().st_size > 100_000:
         return load_jsonl(out_p)
+    from datasets import load_dataset
     leak = json.loads((gate_dir / "leakage_index.json").read_text(encoding="utf-8"))
     exact_leak, prefix_leak = set(leak["exact"]), set(leak["prefixes"])
 
@@ -200,7 +161,12 @@ def run_pass1_onpolicy_and_probes(pool_dir: Path, out_dir: Path, gate_dir: Path,
 
     # Verifiable pass@4 probes targeting Chemistry, Physics, and Math (0/4 -> Qwen3.8-27B)
     probe_items = []
-    for r in nemo_sci_pool[:1000]:
+    clean_nemo = [
+        r for r in nemo_sci_pool
+        if len((r.get("expected_answer") or "").strip()) <= 30
+        and any(ch.isdigit() for ch in (r.get("expected_answer") or ""))
+    ]
+    for r in clean_nemo[:1000]:
         probe_items.append({"source": r["source"], "prompt": r["prompt"], "expected_answer": r["expected_answer"]})
     for r in opensci_pool[:600]:
         probe_items.append({"source": r["source"], "prompt": r["prompt"], "expected_answer": r["expected_answer"]})

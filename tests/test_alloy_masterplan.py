@@ -58,6 +58,14 @@ class AlloyMasterplanTests(unittest.TestCase):
         txt_fa = "<think>\nمحاسبه مستقیم.\n</think>\n\nپاسخ نهایی: \\boxed{۱۲.۵}"
         self.assertEqual(extract_boxed_or_final(txt_fa), "12.5")
         self.assertTrue(answers_match("12.5", "12.50"))
+        # Real Nemotron-RL-Science-v1 formatting normalization checks
+        self.assertTrue(answers_match("K = 1.8 \\times 10^{9}", "1.8\u202f×\u202f10⁹**"))
+        self.assertTrue(answers_match("108", "108 vibrational modes.**"))
+        self.assertTrue(answers_match("x = 6", "6\u202fwater molecules (x\u202f=\u202f6)"))
+        self.assertTrue(answers_match("\\text{Percentage dissociation} \\approx 53.3\\%", "53.33\u202f%**."))
+        self.assertTrue(answers_match("\\Delta G° \\approx +7.85\\ \\text{kJ/mol}", "7.85\u202fkJ**."))
+        self.assertTrue(answers_match("x:y = 2:5", "\\(x:y = 2:5\\)**"))
+        self.assertFalse(answers_match("\\text{Volume percent of SO}_2 \\approx 0.543\\%", "1.09\u202fvol\u202f%"))
 
         short_correct = "<think>\nDirect proof: 2+2=4.\n</think>\n\n\\boxed{4}"
         long_correct = "<think>\n" + ("x " * 2000) + "\n</think>\n\n\\boxed{4}"

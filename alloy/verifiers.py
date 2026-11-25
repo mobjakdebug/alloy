@@ -6,10 +6,12 @@ from typing import Callable, Optional, Sequence
 from alloy.filters import count_tokens_approx, validate_think_structure
 
 _PERSIAN_ARABIC_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+_SUBSCRIPT_DIGITS = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
+_SUPERSCRIPT_MAP = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻", "0123456789+-")
 
 
 def norm_digits(s: str) -> str:
-    return (s or "").translate(_PERSIAN_ARABIC_DIGITS)
+    return (s or "").translate(_PERSIAN_ARABIC_DIGITS).replace("\u202f", " ").replace("\u00a0", " ")
 
 
 def extract_boxed_or_final(txt: str) -> Optional[str]:
@@ -34,27 +36,61 @@ def extract_boxed_or_final(txt: str) -> Optional[str]:
     return None
 
 
+def _clean_math_str(s: str) -> str:
+    t = norm_digits(s).strip()
+    t = t.replace("**", "").replace("\\(", "").replace("\\)", "").replace("$", "").strip()
+    t = re.sub(r"\\(?:text|mathrm|mathbf|ce)\s*\{([^{}]*)\}", r"\1", t)
+    t = re.sub(r"\\(?:approx|sim|simeq)|[≈~]", "", t)
+    t = t.replace("\\%", "%").replace("\\;", " ").replace("\\,", " ").replace("\\ ", " ")
+    # Convert Unicode 10⁹ / 10⁻² -> 10^9 / 10^-2
+    t = re.sub(r"10\s*([⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻]+)", lambda m: f"10^{m.group(1).translate(_SUPERSCRIPT_MAP)}", t)
+    # Convert scientific notation: 1.8 × 10^{9} or 1.8 \times 10^9 -> 1.8e9
+    t = re.sub(r"([0-9]+(?:\.[0-9]+)?)\s*(?:×|\\times|\*)\s*10\^\{?\s*([+-]?\d+)\s*\}?", r"\1e\2", t)
+    t = t.rstrip(".").strip()
+    return t
+
+
+def _extract_leading_number(s: str) -> Optional[float]:
+    t = _clean_math_str(s)
+    # If equation like 'x = 6' or 'K = 1.8e9', take RHS
+    if "=" in t and t.count("=") == 1:
+        lhs, rhs = t.split("=", 1)
+        if len(lhs.strip()) <= 24:
+            t = rhs.strip()
+    nums = re.findall(r"[+-]?(?:\d+(?:\.\d+)?(?:e[+-]?\d+)?)", t, flags=re.IGNORECASE)
+    if len(nums) == 1:
+        try:
+            return float(nums[0])
+        except Exception:
+            return None
+    # When gold/pred starts with a number followed by units/words (e.g. '108 vibrational modes' or '53.33 %')
+    m = re.match(r"^\s*([+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b", t, flags=re.IGNORECASE)
+    if m and len(t) <= 64:
+        try:
+            return float(m.group(1))
+        except Exception:
+            return None
+    return None
+
+
 def answers_match(pred: Optional[str], gold: Optional[str]) -> bool:
-    """Exact + normalized + numeric + SymPy equivalence matching."""
+    """Exact + normalized + scientific-numeric + SymPy equivalence matching."""
     if not pred or not gold:
         return False
-    p = norm_digits(pred).strip().strip("$").strip()
-    g = norm_digits(gold).strip().strip("$").strip()
-    p = re.sub(r"^\\text\{(.*)\}$", r"\1", p).strip()
-    g = re.sub(r"^\\text\{(.*)\}$", r"\1", g).strip()
+    p = _clean_math_str(pred)
+    g = _clean_math_str(gold)
     if p.lower() == g.lower():
         return True
-    p_ns = re.sub(r"\s+", "", p)
-    g_ns = re.sub(r"\s+", "", g)
+    p_ns = re.sub(r"\s+", "", p).translate(_SUBSCRIPT_DIGITS)
+    g_ns = re.sub(r"\s+", "", g).translate(_SUBSCRIPT_DIGITS)
     if p_ns.lower() == g_ns.lower():
         return True
-    try:
-        fp = float(p_ns.replace(",", ""))
-        fg = float(g_ns.replace(",", ""))
-        if abs(fp - fg) <= 1e-4 * max(1.0, abs(fg)):
+    fp = _extract_leading_number(pred)
+    fg = _extract_leading_number(gold)
+    if fp is not None and fg is not None:
+        tol = 0.02 if ("≈" in (gold or "") or "~" in (gold or "")) else 0.005
+        if abs(fp - fg) <= tol * max(1e-12, abs(fg)) + 1e-9:
             return True
-    except Exception:
-        pass
     try:
         from sympy import simplify
         from sympy.parsing.latex import parse_latex
