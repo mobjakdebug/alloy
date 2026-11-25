@@ -1,20 +1,12 @@
-import json
+import json, subprocess
 from pathlib import Path
 import marimo._code_mode as cm
 
 g = cm.get_context().globals
-st = g["get_alloy_job_status"]("setup_and_pools", tail_lines=40)
-print("SETUP_STATUS:", json.dumps(st, indent=2))
-
-gate_p = Path("/marimo/alloy_gate/public_gate_659.json")
-if gate_p.exists():
-    gate = json.loads(gate_p.read_text(encoding="utf-8"))
-    print("PUBLIC_GATE_KEYS:", {k: len(v) if isinstance(v, list) else type(v).__name__ for k, v in gate.items()})
-
-pool_dir = Path("/marimo/alloy_data/phase1_pool")
-if pool_dir.exists():
-    counts = {}
-    for p in sorted(pool_dir.glob("*.jsonl")):
-        with open(p, "r", encoding="utf-8") as f:
-            counts[p.name] = sum(1 for l in f if l.strip())
-    print("POOL_COUNTS:", json.dumps(counts, indent=2))
+print("SETUP_STATUS:", json.dumps(g["get_alloy_job_status"]("setup_and_pools", tail_lines=40), indent=2))
+print("=== DF -H ===")
+print(subprocess.check_output(["df", "-h"], text=True))
+print("=== HF CACHE ===")
+print(subprocess.check_output(["bash", "-c", "ls -lh ~/.cache/huggingface/hub 2>/dev/null || true; du -sh ~/.cache/huggingface/hub/* 2>/dev/null || true"], text=True))
+print("=== NET / THREADS ===")
+print(subprocess.check_output(["bash", "-c", "find ~/.cache/huggingface/hub -name '*.incomplete' -ls 2>/dev/null | head -n 20 || true"], text=True))
