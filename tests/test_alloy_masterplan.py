@@ -6,10 +6,14 @@ import unittest
 from pathlib import Path
 
 from alloy.filters import is_leaked_prompt, normalize_for_leakage, passes_zero_hesitation_filter
-from alloy.phase2_and_3 import ROUND2_TRAIN_CONFIG
+from alloy.masterplan_pipeline import PHASE1_R2_SCRIPT
+from alloy.phase2_and_3 import PHASE2_R2_SFT_SCRIPT, PHASE3_GRPO_SCRIPT, ROUND2_TRAIN_CONFIG
+from alloy.phase4_eval import PHASE4_RALPH_EVAL_SCRIPT
+from alloy.public_eval import PUBLIC_VLLM_EVAL_SCRIPT
 from alloy.ralph_loop import RalphWiggumLoop, extract_unified_diff
 from alloy.verifiers import (
     answers_match,
+    evaluate_public_regression_gate,
     evaluate_regression_gate,
     extract_boxed_or_final,
     grpo_length_penalized_reward,
@@ -162,6 +166,29 @@ class AlloyMasterplanTests(unittest.TestCase):
             p1 = seen_prompts[0][1]["content"].split("</problem_spec>")[0]
             p2 = seen_prompts[1][1]["content"].split("</problem_spec>")[0]
             self.assertEqual(p1, p2)
+
+    def test_public_gate_and_embedded_scripts_compile(self):
+        for name, src in [
+            ("PHASE1_R2_SCRIPT", PHASE1_R2_SCRIPT),
+            ("PHASE2_R2_SFT_SCRIPT", PHASE2_R2_SFT_SCRIPT),
+            ("PHASE3_GRPO_SCRIPT", PHASE3_GRPO_SCRIPT),
+            ("PUBLIC_VLLM_EVAL_SCRIPT", PUBLIC_VLLM_EVAL_SCRIPT),
+            ("PHASE4_RALPH_EVAL_SCRIPT", PHASE4_RALPH_EVAL_SCRIPT),
+        ]:
+            compile(src, name, "exec")
+
+        base = {"metrics": {"science_bench": {"accuracy_pct": 48.0}}}
+        good = {
+            "metrics": {
+                "konkur": {"accuracy_pct": 50.8},
+                "physlogic": {"accuracy_pct": 30.0, "parsed": 185, "total": 200, "parsed_pct": 92.5},
+                "science_bench": {"accuracy_pct": 52.0, "parsed": 186, "total": 200, "parsed_pct": 93.0},
+            },
+            "identity_probes": [{"response": "Alloy by Mob AI"}] * 6,
+            "tool_probes": [{"response": "<tool_call>x</tool_call>"}] * 3,
+        }
+        ok, rep = evaluate_public_regression_gate(good, base)
+        self.assertTrue(ok, rep)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,202 @@ ROUND2_TRAIN_CONFIG = {
     "im_end_id": 248046,
 }
 
+PHASE2_R2_SFT_SCRIPT = r'''import argparse, gc, json, os, sys, time
+from pathlib import Path
+import torch
+from datasets import Dataset
+from peft import LoraConfig, get_peft_model
+from transformers import (
+    AutoModelForImageTextToText,
+    AutoTokenizer,
+    DataCollatorForSeq2Seq,
+    Trainer,
+    TrainerCallback,
+    TrainingArguments,
+)
+
+REPO_DIR = Path("/marimo/alloy_repo")
+if REPO_DIR.exists() and str(REPO_DIR) not in sys.path:
+    sys.path.insert(0, str(REPO_DIR))
+
+from alloy.phase2_and_3 import ROUND2_TRAIN_CONFIG
+
+
+def build_tool_anchors(tok) -> list[dict]:
+    tool_defs = [
+        {"type": "function", "function": {"name": "read_file", "description": "Read a workspace file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
+        {"type": "function", "function": {"name": "edit_file", "description": "Replace exact text in a file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}}},
+        {"type": "function", "function": {"name": "bash", "description": "Run a shell command", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+    ]
+    paths = ["src/main.py", "tests/test_api.py", "pyproject.toml", "app/server.ts"]
+    cmds = ["pytest -q", "git status", "cargo test", "go test ./..."]
+    tpls = [
+        ("Call the `read_file` tool with path='{p}'. Return only the tool call.", "<think>\nThe user wants me to call read_file on {p}.\n</think>\n\n<tool_call>\n<function=read_file>\n<parameter=path>\n{p}\n</parameter>\n</function>\n</tool_call>"),
+        ("Run a bash command `{c}` using your tool format.", "<think>\nI should invoke bash with the requested command.\n</think>\n\n<tool_call>\n<function=bash>\n<parameter=command>\n{c}\n</parameter>\n</function>\n</tool_call>"),
+        ("فایل `{p}` را با ابزار `read_file` بخوان.", "<think>\nکاربر می‌خواهد فایل {p} را با ابزار read_file بخوانم.\n</think>\n\n<tool_call>\n<function=read_file>\n<parameter=path>\n{p}\n</parameter>\n</function>\n</tool_call>"),
+    ]
+    out = []
+    for idx in range(ROUND2_TRAIN_CONFIG["tool_call_anchors"]):
+        tu, ta = tpls[idx % len(tpls)]
+        p, c = paths[idx % len(paths)], cmds[idx % len(cmds)]
+        out.append({
+            "source": "tool_call_anchor",
+            "text": tok.apply_chat_template(
+                [{"role": "user", "content": tu.format(p=p, c=c)}, {"role": "assistant", "content": ta.format(p=p, c=c)}],
+                tools=tool_defs,
+                tokenize=False,
+                add_generation_prompt=False,
+            ),
+        })
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data-path", default="/marimo/alloy_data/phase1_r2_verified/alloy_round2_train.jsonl")
+    ap.add_argument("--out-dir", default="/marimo/runs/alloy_round2")
+    ap.add_argument("--max-hours", type=float, default=ROUND2_TRAIN_CONFIG["max_hours"])
+    args = ap.parse_args()
+
+    base_model = ROUND2_TRAIN_CONFIG["base_model"]
+    tok = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    tok.padding_side = "right"
+
+    with open(args.data_path, "r", encoding="utf-8") as f:
+        rows = [json.loads(line) for line in f if line.strip()]
+    rows.extend(build_tool_anchors(tok))
+
+    asst_hdr = ROUND2_TRAIN_CONFIG["assistant_header_ids"]
+    im_end = ROUND2_TRAIN_CONFIG["im_end_id"]
+    max_len = ROUND2_TRAIN_CONFIG["max_length"]
+
+    input_ids_all, labels_all = [], []
+    for r in rows:
+        ids = tok.encode(r["text"], add_special_tokens=False)[:max_len]
+        labels = [-100] * len(ids)
+        i, n = 0, len(ids)
+        while i <= n - 3:
+            if ids[i] == asst_hdr[0] and ids[i + 1] == asst_hdr[1] and ids[i + 2] == asst_hdr[2]:
+                j = i + 3
+                while j < n:
+                    labels[j] = ids[j]
+                    if ids[j] == im_end:
+                        j += 1
+                        break
+                    j += 1
+                i = j
+            else:
+                i += 1
+        if any(x != -100 for x in labels):
+            input_ids_all.append(ids)
+            labels_all.append(labels)
+
+    train_ds = Dataset.from_dict({"input_ids": input_ids_all, "labels": labels_all})
+    total_steps = max(1, len(train_ds) // 32)
+    warmup_steps = max(10, int(0.05 * total_steps))
+    print(f"[Phase2 R2] Dataset={len(train_ds)} rows (~{total_steps} steps, warmup={warmup_steps}), use_rslora={ROUND2_TRAIN_CONFIG['use_rslora']}, r={ROUND2_TRAIN_CONFIG['lora_r']}, alpha={ROUND2_TRAIN_CONFIG['lora_alpha']}, lr={ROUND2_TRAIN_CONFIG['learning_rate']}", flush=True)
+
+    model = AutoModelForImageTextToText.from_pretrained(base_model, dtype=torch.bfloat16, trust_remote_code=True).to("cuda:0")
+    model.config.use_cache = False
+    lora_cfg = LoraConfig(
+        r=ROUND2_TRAIN_CONFIG["lora_r"],
+        lora_alpha=ROUND2_TRAIN_CONFIG["lora_alpha"],
+        lora_dropout=ROUND2_TRAIN_CONFIG["lora_dropout"],
+        use_rslora=ROUND2_TRAIN_CONFIG["use_rslora"],
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=[
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "out_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ],
+        exclude_modules=".*visual.*|.*vision.*",
+    )
+    model = get_peft_model(model, lora_cfg)
+    model.enable_input_require_grads()
+
+    r2_dir = Path(args.out_dir)
+    r2_dir.mkdir(parents=True, exist_ok=True)
+
+    hf_token = (os.environ.get("HF_TOKEN") or "").strip()
+    api = None
+    if hf_token:
+        from huggingface_hub import HfApi
+        api = HfApi(token=hf_token)
+
+    class R2Cb(TrainerCallback):
+        def __init__(self, hours: float):
+            self.t0 = time.time()
+            self.max_sec = hours * 3600.0
+
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            if logs and logs.get("loss") is not None:
+                print(f"[Phase2 R2] step={state.global_step}/{state.max_steps} loss={logs['loss']:.4f} lr={logs.get('learning_rate', 0):.2e} elapsed={(time.time()-self.t0)/60:.1f}m", flush=True)
+
+        def on_save(self, args, state, control, **kwargs):
+            if api is not None:
+                ck = r2_dir / f"checkpoint-{state.global_step}"
+                if ck.exists():
+                    try:
+                        api.upload_folder(folder_path=str(ck), path_in_repo=f"round2/checkpoint-{state.global_step}", repo_id="officialmobai/Alloy-9B-checkpoints", repo_type="model")
+                    except Exception as e:
+                        print(f"[Phase2 R2] HF upload warning: {e}", flush=True)
+
+        def on_step_end(self, args, state, control, **kwargs):
+            if (time.time() - self.t0) >= self.max_sec:
+                control.should_save = True
+                control.should_training_stop = True
+
+    trainer = Trainer(
+        model=model,
+        args=TrainingArguments(
+            output_dir=str(r2_dir),
+            num_train_epochs=1,
+            per_device_train_batch_size=2,
+            gradient_accumulation_steps=16,
+            learning_rate=ROUND2_TRAIN_CONFIG["learning_rate"],
+            lr_scheduler_type=ROUND2_TRAIN_CONFIG["lr_scheduler_type"],
+            warmup_steps=warmup_steps,
+            weight_decay=0.01,
+            max_grad_norm=1.0,
+            bf16=True,
+            gradient_checkpointing=True,
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+            logging_steps=10,
+            save_strategy="steps",
+            save_steps=ROUND2_TRAIN_CONFIG["save_steps"],
+            save_total_limit=6,
+            push_to_hub=False,
+            report_to="none",
+            dataloader_num_workers=4,
+        ),
+        train_dataset=train_ds,
+        data_collator=DataCollatorForSeq2Seq(tok, pad_to_multiple_of=8, label_pad_token_id=-100),
+        callbacks=[R2Cb(args.max_hours)],
+    )
+    res = trainer.train()
+    final_r2 = r2_dir / "final_adapter"
+    model.save_pretrained(str(final_r2))
+    tok.save_pretrained(str(final_r2))
+    if api is not None:
+        try:
+            api.upload_folder(folder_path=str(final_r2), path_in_repo="round2_final_adapter", repo_id="officialmobai/Alloy-9B-checkpoints", repo_type="model")
+        except Exception as e:
+            print(f"[Phase2 R2] Final HF upload warning: {e}", flush=True)
+    summary = {"training_loss": float(res.training_loss), "global_step": int(res.global_step), "final_adapter": str(final_r2)}
+    (r2_dir / "round2_train_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print("PHASE2_R2_DONE:", json.dumps(summary), flush=True)
+    del trainer, model
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+if __name__ == "__main__":
+    main()
+'''
+
 PHASE3_GRPO_SCRIPT = r'''import argparse, json, os, random, re
 from pathlib import Path
 from datasets import Dataset, load_dataset
