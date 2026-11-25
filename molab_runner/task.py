@@ -10,9 +10,6 @@ gate_p = Path("/marimo/alloy_gate/public_gate_659.json")
 if gate_p.exists():
     gate = json.loads(gate_p.read_text(encoding="utf-8"))
     print("PUBLIC_GATE_KEYS:", {k: len(v) if isinstance(v, list) else type(v).__name__ for k, v in gate.items()})
-    for k in ("science_bench", "konkur_gate", "physlogic_gate"):
-        if k in gate and gate[k]:
-            print(f"SAMPLE_{k}:", json.dumps(gate[k][0], ensure_ascii=False)[:400])
 
 pool_dir = Path("/marimo/alloy_data/phase1_pool")
 if pool_dir.exists():

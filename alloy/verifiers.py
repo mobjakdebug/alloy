@@ -191,3 +191,50 @@ def evaluate_regression_gate(eval_payload: dict) -> tuple[bool, dict]:
         "checks": checks,
     }
     return all(checks.values()), report
+
+
+def evaluate_public_regression_gate(eval_payload: dict, baseline_payload: dict | None = None) -> tuple[bool, dict]:
+    """Regression Gate for public_gate_659.json (Konkur-250, PhysLogic-200, ScienceBench-200, ID-6, Tool-3)."""
+    m = eval_payload.get("metrics", {})
+    bm = (baseline_payload or {}).get("metrics", {})
+    konkur = m.get("konkur", {})
+    phys = m.get("physlogic", {})
+    sci = m.get("science_bench", {})
+
+    konkur_acc = float(konkur.get("accuracy_pct", 0.0))
+    phys_acc = float(phys.get("accuracy_pct", 0.0))
+    sci_acc = float(sci.get("accuracy_pct", 0.0))
+    phys_parsed_pct = float(phys.get("parsed_pct", 100.0 * float(phys.get("parsed", 0)) / max(1, int(phys.get("total", 200)))))
+    sci_parsed_pct = float(sci.get("parsed_pct", 100.0 * float(sci.get("parsed", 0)) / max(1, int(sci.get("total", 200)))))
+
+    base_sci_acc = float(bm.get("science_bench", {}).get("accuracy_pct", 0.0))
+    id_ok = sum(
+        1 for p in eval_payload.get("identity_probes", [])
+        if "alloy" in p.get("response", "").lower() and "mob ai" in p.get("response", "").lower()
+    )
+    tool_ok = sum(
+        1 for p in eval_payload.get("tool_probes", [])
+        if "<tool_call>" in p.get("response", "") and "</tool_call>" in p.get("response", "")
+    )
+
+    checks = {
+        "science_bench_ge_baseline": sci_acc >= base_sci_acc,
+        "science_bench_parsed_ge_90": sci_parsed_pct >= 90.0,
+        "physlogic_parsed_ge_90": phys_parsed_pct >= 90.0,
+        "konkur_acc_ge_49_6": konkur_acc >= 49.6,
+        "physlogic_acc_ge_28_5": phys_acc >= 28.5,
+        "identity_6_of_6": id_ok == 6,
+        "tool_calls_3_of_3": tool_ok == 3,
+    }
+    report = {
+        "science_bench_acc": sci_acc,
+        "science_bench_baseline_acc": base_sci_acc,
+        "science_bench_parsed_pct": round(sci_parsed_pct, 2),
+        "konkur_acc": konkur_acc,
+        "physlogic_acc": phys_acc,
+        "physlogic_parsed_pct": round(phys_parsed_pct, 2),
+        "identity_ok": f"{id_ok}/6",
+        "tool_ok": f"{tool_ok}/3",
+        "checks": checks,
+    }
+    return all(checks.values()), report
