@@ -6,14 +6,36 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import marimo._code_mode as cm
 
+REPO_DIR = Path("/marimo/alloy_repo")
+if not (REPO_DIR / ".git").exists():
+    subprocess.run(
+        ["git", "clone", "--depth", "1", "-b", "arena/2b4e287c-alloy", "https://github.com/mobjakdebug/alloy.git", str(REPO_DIR)],
+        check=True,
+    )
+else:
+    subprocess.run(["git", "-C", str(REPO_DIR), "fetch", "origin", "arena/2b4e287c-alloy"], check=True)
+    subprocess.run(["git", "-C", str(REPO_DIR), "reset", "--hard", "origin/arena/2b4e287c-alloy"], check=True)
+
+if str(REPO_DIR) not in sys.path:
+    sys.path.insert(0, str(REPO_DIR))
+
 from alloy.masterplan_pipeline import PHASE1_R2_SCRIPT
 from alloy.phase2_and_3 import PHASE3_GRPO_SCRIPT, ROUND2_TRAIN_CONFIG
 from alloy.verifiers import evaluate_regression_gate
+
+# Ensure core notebook cells are initialized if kernel just booted fresh
+if "start_alloy_job" not in cm.get_context().globals:
+    async with cm.get_context() as _ctx:
+        _by_name = {c.name: c.id for c in _ctx.cells}
+        for _nm in ["imports", "header", "env_probe", "config_ui", "guard_helpers", "job_manager", "vllm_gate_and_eval", "phase1_dataset_pool"]:
+            if _nm in _by_name:
+                _ctx.run_cell(_by_name[_nm])
 
 g = cm.get_context().globals
 
