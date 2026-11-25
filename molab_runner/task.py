@@ -1,9 +1,13 @@
-import json
+import json, subprocess
 from pathlib import Path
 import marimo._code_mode as cm
 
 g = cm.get_context().globals
-print("SETUP_BASELINE_STATUS:", json.dumps(g["get_alloy_job_status"]("setup_and_baseline", tail_lines=35), indent=2))
+print("SETUP_BASELINE_STATUS:", json.dumps(g["get_alloy_job_status"]("setup_and_baseline", tail_lines=30), indent=2))
+print("=== PS ===")
+print(subprocess.check_output(["ps", "-ef"], text=True))
+print("=== GPU ===")
+print(subprocess.check_output(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader"], text=True))
 bp = Path("/marimo/alloy_gate/baseline_public_vllm.json")
 if bp.exists():
     d = json.loads(bp.read_text(encoding="utf-8"))
