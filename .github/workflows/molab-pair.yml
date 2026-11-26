@@ -27,12 +27,18 @@ jobs:
         env:
           MOLAB_URL: ${{ secrets.MOLAB_URL }}
           MOLAB_TOKEN: ${{ secrets.MOLAB_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SCRIPT_PATH: ${{ github.event.inputs.script_path || 'molab_runner/task.py' }}
         run: |
           if [ -z "$MOLAB_URL" ] || [ -z "$MOLAB_TOKEN" ]; then
             echo "::error::Missing MOLAB_URL or MOLAB_TOKEN GitHub Actions secret."
             echo "Add MOLAB_URL and MOLAB_TOKEN in Repo Settings -> Secrets and variables -> Actions."
             exit 1
+          fi
+          if [ -n "$HF_TOKEN" ]; then
+            echo "GH_SECRET_HF_TOKEN=true"
+          else
+            echo "GH_SECRET_HF_TOKEN=false"
           fi
           if [ ! -f "$SCRIPT_PATH" ]; then
             echo "::error::Runner script not found: $SCRIPT_PATH"
