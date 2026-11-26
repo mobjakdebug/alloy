@@ -3,22 +3,14 @@ import shutil
 import subprocess
 from pathlib import Path
 
-# 1. Persist Round 2 eval artifacts into /marimo/runs/alloy_evals
-eval_bak = Path("/marimo/runs/alloy_evals")
-eval_bak.mkdir(parents=True, exist_ok=True)
-for fn in ["public_gate_659.json", "leakage_index.json", "baseline_public_vllm.json", "round2_alloy_public_vllm.json"]:
-    src = Path("/marimo/alloy_gate") / fn
-    if src.exists():
-        shutil.copy2(src, eval_bak / fn)
-print("BACKED_UP_EVALS:", sorted(p.name for p in eval_bak.glob("*.json")))
-
-# 2. Ensure pandas/pyarrow in /marimo/vllm_venv so datasets works cleanly
-vllm_pip = "/marimo/vllm_venv/bin/pip"
 vllm_py = "/marimo/vllm_venv/bin/python"
-proc_pip = subprocess.run([vllm_pip, "install", "-q", "pandas", "pyarrow"], capture_output=True, text=True)
-print("PIP_RC:", proc_pip.returncode, proc_pip.stderr[-300:])
+uv_bin = shutil.which("uv") or "/usr/local/bin/uv"
+if Path(uv_bin).exists():
+    p = subprocess.run([uv_bin, "pip", "install", "-q", "--python", vllm_py, "pandas", "pyarrow"], capture_output=True, text=True)
+else:
+    p = subprocess.run([vllm_py, "-m", "pip", "install", "-q", "pandas", "pyarrow"], capture_output=True, text=True)
+print("PIP_RC:", p.returncode, p.stderr[-300:])
 
-# 3. 1-step smoke test of TRL GRPOTrainer with vllm_mode='colocate' in /marimo/vllm_venv
 smoke = r'''
 import os, time
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -79,7 +71,7 @@ tr.train()
 print("COLOCATE_SMOKE_OK elapsed=", round(time.time() - t0, 1))
 '''
 Path("/tmp/grpo_colocate_smoke.py").write_text(smoke, encoding="utf-8")
-proc = subprocess.run([vllm_py, "/tmp/grpo_colocate_smoke.py"], capture_output=True, text=True, timeout=300)
+proc = subprocess.run([vllm_py, "/tmp/grpo_colocate_smoke.py"], capture_output=True, text=True, timeout=180)
 print("SMOKE_RC:", proc.returncode)
 print("SMOKE_STDOUT:", proc.stdout[-1500:])
 print("SMOKE_STDERR:", proc.stderr[-1500:])
