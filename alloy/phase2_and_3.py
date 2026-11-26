@@ -214,16 +214,27 @@ if __name__ == "__main__":
     main()
 '''
 
-PHASE3_GRPO_SCRIPT = r'''import argparse, json, os, random, re
+PHASE3_GRPO_SCRIPT = r'''import argparse, gc, json, os, random, re, sys
 from pathlib import Path
-from datasets import Dataset, load_dataset
+
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+os.environ.setdefault("MASTER_PORT", "29502")
+
+REPO_DIR = Path("/marimo/alloy_repo")
+if REPO_DIR.exists() and str(REPO_DIR) not in sys.path:
+    sys.path.insert(0, str(REPO_DIR))
+
+import torch
+from datasets import Dataset
 from peft import LoraConfig, PeftModel
 from transformers import AutoModelForImageTextToText, AutoTokenizer
 from trl import GRPOConfig, GRPOTrainer
 
 from alloy.verifiers import make_trl_reward_funcs
 
-def build_grpo_prompts(pool_dir: Path, gate_dir: Path, tok, limit: int = 1500) -> Dataset:
+
+def build_grpo_prompts(pool_dir: Path, gate_dir: Path, tok, limit_per_pool: int = 350) -> Dataset:
     leak = json.loads((gate_dir / "leakage_index.json").read_text(encoding="utf-8"))
     exact_leak, prefix_leak = set(leak["exact"]), set(leak["prefixes"])
 
@@ -235,32 +246,41 @@ def build_grpo_prompts(pool_dir: Path, gate_dir: Path, tok, limit: int = 1500) -
         n = norm_l(s)
         return (n in exact_leak) or (len(n) >= 100 and n[:100] in prefix_leak)
 
+    rng = random.Random(2026)
     rows = []
-    for fn in ["nemotron_science_verifiable.jsonl", "openscience_pool.jsonl", "openmath_pool.jsonl"]:
+    pools = [
+        "persian_prompts_pool.jsonl",
+        "nemotron_science_verifiable.jsonl",
+        "openscience_pool.jsonl",
+        "openmath_pool.jsonl",
+    ]
+    for fn in pools:
         p = pool_dir / fn
         if not p.exists():
             continue
+        pool_rows = []
         with open(p, "r", encoding="utf-8") as f:
             for line in f:
                 if not line.strip():
                     continue
                 r = json.loads(line)
-                ans = (r.get("expected_answer") or "").strip()
+                ans = str(r.get("expected_answer") or "").strip()
                 prob = (r.get("prompt") or "").strip()
-                if not prob or not ans or len(ans) > 60 or leaked(prob):
+                if not prob or not ans or len(ans) > 48 or leaked(prob):
                     continue
                 if "\\boxed" not in prob:
                     prob = prob + "\n\nSolve concisely and place your final answer inside \\boxed{}."
-                rows.append({
+                pool_rows.append({
                     "prompt": [{"role": "user", "content": prob}],
                     "expected_answer": ans,
                     "source": r.get("source", fn),
                 })
+        rng.shuffle(pool_rows)
+        rows.extend(pool_rows[:limit_per_pool])
 
-    rng = random.Random(2026)
     rng.shuffle(rows)
-    rows = rows[:limit]
     return Dataset.from_list(rows)
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -269,19 +289,22 @@ def main():
     ap.add_argument("--pool-dir", default="/marimo/alloy_data/phase1_pool")
     ap.add_argument("--gate-dir", default="/marimo/alloy_gate")
     ap.add_argument("--out-dir", default="/marimo/runs/alloy_round3_grpo")
-    ap.add_argument("--max-steps", type=int, default=150)
+    ap.add_argument("--merged-out-dir", default="/marimo/runs/alloy_9b_merged")
+    ap.add_argument("--max-steps", type=int, default=80)
     ap.add_argument("--num-generations", type=int, default=4)
+    ap.add_argument("--max-completion-length", type=int, default=3072)
+    ap.add_argument("--no-vllm", action="store_true")
     args = ap.parse_args()
 
     tok = AutoTokenizer.from_pretrained(args.base_model, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
-    ds = build_grpo_prompts(Path(args.pool_dir), Path(args.gate_dir), tok, limit=1500)
-    print(f"[GRPO] Loaded {len(ds)} verifiable prompts.", flush=True)
+    ds = build_grpo_prompts(Path(args.pool_dir), Path(args.gate_dir), tok, limit_per_pool=350)
+    print(f"[GRPO] Loaded {len(ds)} verifiable prompts across STEM/Math/Persian.", flush=True)
 
     # Merge Round 2 SFT adapter cleanly into BF16 base before RL LoRA
-    base_m = AutoModelForImageTextToText.from_pretrained(args.base_model, dtype="auto", trust_remote_code=True)
+    base_m = AutoModelForImageTextToText.from_pretrained(args.base_model, dtype=torch.bfloat16, trust_remote_code=True)
     merged_m = PeftModel.from_pretrained(base_m, args.sft_adapter).merge_and_unload()
 
     rl_lora = LoraConfig(
@@ -299,15 +322,16 @@ def main():
         exclude_modules=".*visual.*|.*vision.*",
     )
 
+    use_vllm = not args.no_vllm
     grpo_args = GRPOConfig(
         output_dir=args.out_dir,
         learning_rate=5e-6,
         lr_scheduler_type="cosine",
-        warmup_steps=10,
+        warmup_steps=5,
         per_device_train_batch_size=4,
         gradient_accumulation_steps=4,
         num_generations=args.num_generations,
-        max_completion_length=3584,
+        max_completion_length=args.max_completion_length,
         temperature=0.8,
         beta=0.02,
         loss_type="dapo",
@@ -317,9 +341,13 @@ def main():
         max_steps=args.max_steps,
         bf16=True,
         gradient_checkpointing=True,
-        use_vllm=False,
-        logging_steps=5,
-        save_steps=50,
+        use_vllm=use_vllm,
+        vllm_mode="colocate",
+        vllm_gpu_memory_utilization=0.35,
+        vllm_max_model_length=args.max_completion_length + 1536,
+        logging_steps=1,
+        save_steps=25,
+        save_total_limit=3,
         report_to="none",
         push_to_hub=False,
     )
@@ -333,11 +361,40 @@ def main():
         peft_config=rl_lora,
         processing_class=tok,
     )
-    trainer.train()
+    res = trainer.train()
     final_rl = Path(args.out_dir) / "final_grpo_adapter"
     trainer.save_model(str(final_rl))
     tok.save_pretrained(str(final_rl))
     print(f"[GRPO] Saved final RL adapter to {final_rl}", flush=True)
+
+    # Save full merged Round2+GRPO BF16 model for direct vLLM evaluation & Phase 4 Ralph loop
+    merged_out = Path(args.merged_out_dir)
+    merged_out.mkdir(parents=True, exist_ok=True)
+    full_merged = trainer.model.merge_and_unload()
+    full_merged.save_pretrained(str(merged_out))
+    tok.save_pretrained(str(merged_out))
+    try:
+        from huggingface_hub import snapshot_download
+        src_snap = Path(snapshot_download(args.base_model, local_files_only=True))
+        for extra_fn in ("preprocessor_config.json", "video_preprocessor_config.json", "chat_template.jinja"):
+            sp = src_snap / extra_fn
+            if sp.exists() and not (merged_out / extra_fn).exists():
+                import shutil
+                shutil.copy2(sp, merged_out / extra_fn)
+    except Exception as e:
+        print(f"[GRPO] Non-fatal config copy warning: {e}", flush=True)
+    summary = {
+        "training_loss": float(res.training_loss),
+        "global_step": int(res.global_step),
+        "final_grpo_adapter": str(final_rl),
+        "merged_model_dir": str(merged_out),
+    }
+    (Path(args.out_dir) / "grpo_train_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print("PHASE3_GRPO_DONE:", json.dumps(summary), flush=True)
+    del trainer, full_merged, merged_m, base_m
+    gc.collect()
+    torch.cuda.empty_cache()
+
 
 if __name__ == "__main__":
     main()

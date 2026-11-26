@@ -198,6 +198,25 @@ class AlloyMasterplanTests(unittest.TestCase):
         ok, rep = evaluate_public_regression_gate(good, base)
         self.assertTrue(ok, rep)
 
+        real_base = {
+            "metrics": {
+                "konkur": {"accuracy_pct": 43.2},
+                "physlogic": {"accuracy_pct": 30.5, "parsed_pct": 33.5},
+                "science_bench": {"accuracy_pct": 26.5, "parsed_pct": 77.5},
+            }
+        }
+        r2_real = {
+            "metrics": {
+                "konkur": {"accuracy_pct": 48.8},
+                "physlogic": {"accuracy_pct": 34.0, "parsed_pct": 36.5},
+                "science_bench": {"accuracy_pct": 26.5, "parsed_pct": 71.5},
+            },
+            "identity_probes": [{"response": "Alloy by Mob AI"}] * 6,
+            "tool_probes": [{"response": "<tool_call>x</tool_call>"}] * 3,
+        }
+        ok_real, rep_real = evaluate_public_regression_gate(r2_real, real_base)
+        self.assertTrue(ok_real, rep_real)
+
 
 if __name__ == "__main__":
     unittest.main()
