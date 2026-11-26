@@ -1,19 +1,21 @@
 import json
-import subprocess
 from pathlib import Path
 
-print("STAGE2_STATUS:", json.dumps(get_alloy_job_status("alloy_stage2", tail_lines=45), indent=2))
-print("GPU:", subprocess.check_output(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader"], text=True).strip())
-
-for label, p in [
-    ("GRPO_SUMMARY", Path("/marimo/runs/alloy_round3_grpo/grpo_train_summary.json")),
-    ("GRPO_EVAL", Path("/marimo/runs/alloy_evals/grpo_alloy_public_vllm.json")),
-    ("PHASE4_BASELINE", Path("/marimo/runs/alloy_evals/phase4_baseline_ralph.json")),
-    ("PHASE4_ALLOY", Path("/marimo/runs/alloy_evals/phase4_alloy_ralph.json")),
-]:
+for name in ["phase4_baseline_ralph.json", "phase4_alloy_ralph.json"]:
+    p = Path("/marimo/runs/alloy_evals") / name
     if p.exists():
-        data = json.loads(p.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            data.pop("detailed", None)
-            data.pop("tasks", None)
-        print(f"{label}:", json.dumps(data, indent=2, ensure_ascii=False))
+        d = json.loads(p.read_text(encoding="utf-8"))
+        print(f"=== {name} ===")
+        for t in d.get("tasks", []):
+            print(t["id"], "solved=", t["solved"], "iters=", t["iterations_used"], "calls=", t["calls"], "attempts=", [(a["applied"], a["passed"], a["err"][:120]) for a in t["attempts"]])
+
+# Also verify Round 2 SFT vs Baseline under updated evaluate_public_regression_gate
+import sys
+sys.path.insert(0, "/marimo/alloy_repo")
+from alloy.verifiers import evaluate_public_regression_gate
+
+base = json.loads(Path("/marimo/runs/alloy_evals/baseline_public_vllm.json").read_text(encoding="utf-8"))
+r2 = json.loads(Path("/marimo/runs/alloy_evals/round2_alloy_public_vllm.json").read_text(encoding="utf-8"))
+grpo = json.loads(Path("/marimo/runs/alloy_evals/grpo_alloy_public_vllm.json").read_text(encoding="utf-8"))
+print("R2_GATE:", json.dumps(evaluate_public_regression_gate(r2, base), indent=2))
+print("GRPO_GATE:", json.dumps(evaluate_public_regression_gate(grpo, base), indent=2))
