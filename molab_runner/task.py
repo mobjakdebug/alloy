@@ -3,19 +3,20 @@ import shutil
 import subprocess
 from pathlib import Path
 
-vllm_py = "/marimo/vllm_venv/bin/python"
-uv_bin = shutil.which("uv") or "/usr/local/bin/uv"
-if Path(uv_bin).exists():
-    p = subprocess.run([uv_bin, "pip", "install", "-q", "--python", vllm_py, "pandas", "pyarrow"], capture_output=True, text=True)
-else:
-    p = subprocess.run([vllm_py, "-m", "pip", "install", "-q", "pandas", "pyarrow"], capture_output=True, text=True)
-print("PIP_RC:", p.returncode, p.stderr[-300:])
+log_dir = Path("/marimo/alloy_logs")
+log_dir.mkdir(parents=True, exist_ok=True)
+log_path = log_dir / "grpo_smoke.log"
 
-smoke = r'''
-import os, time
+smoke = r'''import os, shutil, subprocess, time
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
 os.environ.setdefault("MASTER_PORT", "29501")
+
+uv_bin = shutil.which("uv") or "/usr/local/bin/uv"
+vllm_py = "/marimo/vllm_venv/bin/python"
+if os.path.exists(uv_bin):
+    subprocess.run([uv_bin, "pip", "install", "-q", "--python", vllm_py, "pandas", "pyarrow"], check=False)
+
 import torch
 from datasets import Dataset
 from peft import LoraConfig, PeftModel
@@ -23,6 +24,7 @@ from transformers import AutoModelForImageTextToText, AutoTokenizer
 from trl import GRPOConfig, GRPOTrainer
 
 t0 = time.time()
+print("Loading tokenizer & base model...", flush=True)
 tok = AutoTokenizer.from_pretrained("ornith-ai/Ornith-1.5-9B", trust_remote_code=True)
 if tok.pad_token is None:
     tok.pad_token = tok.eos_token
@@ -66,12 +68,23 @@ cfg = GRPOConfig(
 def rew(completions, **kwargs):
     return [1.0 for _ in completions]
 
+print("Creating GRPOTrainer(vllm_mode='colocate')...", flush=True)
 tr = GRPOTrainer(model=merged_m, reward_funcs=[rew], args=cfg, train_dataset=ds, peft_config=rl_lora, processing_class=tok)
+print("Starting 1-step train...", flush=True)
 tr.train()
-print("COLOCATE_SMOKE_OK elapsed=", round(time.time() - t0, 1))
+print("COLOCATE_SMOKE_OK elapsed=", round(time.time() - t0, 1), flush=True)
 '''
 Path("/tmp/grpo_colocate_smoke.py").write_text(smoke, encoding="utf-8")
-proc = subprocess.run([vllm_py, "/tmp/grpo_colocate_smoke.py"], capture_output=True, text=True, timeout=180)
-print("SMOKE_RC:", proc.returncode)
-print("SMOKE_STDOUT:", proc.stdout[-1500:])
-print("SMOKE_STDERR:", proc.stderr[-1500:])
+
+cmd = ["/marimo/vllm_venv/bin/python", "/tmp/grpo_colocate_smoke.py"]
+if "start_alloy_job" in globals():
+    def _runner():
+        with open(log_path, "w", encoding="utf-8") as f:
+            proc = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(f"grpo_smoke rc={proc.returncode}")
+        return {"ok": True}
+    start_alloy_job("grpo_smoke", _runner, str(log_path))
+    print("LAUNCHED grpo_smoke")
+else:
+    print("NO start_alloy_job in globals")
