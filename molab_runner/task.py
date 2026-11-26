@@ -1,4 +1,5 @@
-import json, os, subprocess
+import json, os, shutil, subprocess, sys
+from collections import deque
 from pathlib import Path
 import marimo._code_mode as cm
 
@@ -12,28 +13,405 @@ if "start_alloy_job" not in cm.get_context().globals:
                 ctx.run_cell(by_name[nm])
 
 g = cm.get_context().globals
-ui_tok = (getattr(g.get("hf_token_ui"), "value", "") or "").strip()
-env_tok = (os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN") or "").strip()
-cfg_tok = Path("/marimo/.config/hf_token").read_text().strip() if Path("/marimo/.config/hf_token").exists() else ""
-print("TOKENS_PRESENT:", {"ui": bool(ui_tok), "env": bool(env_tok), "cfg": bool(cfg_tok)})
-if ui_tok and not cfg_tok:
-    Path("/marimo/.config").mkdir(parents=True, exist_ok=True)
-    Path("/marimo/.config/hf_token").write_text(ui_tok, encoding="utf-8")
-    os.chmod("/marimo/.config/hf_token", 0o600)
 
-print("GPU:", subprocess.check_output(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"], text=True).strip())
-print("VLLM_VENV_EXISTS:", Path("/marimo/vllm_venv/bin/python").exists())
-for d in ["/marimo/alloy_gate", "/marimo/alloy_data/phase1_pool", "/marimo/alloy_data/phase1_r2_verified", "/marimo/runs"]:
-    p = Path(d)
-    if p.exists():
-        items = {}
-        for x in sorted(p.iterdir()):
-            if x.is_file():
-                items[x.name] = x.stat().st_size
-            elif x.is_dir():
-                items[x.name + "/"] = len(list(x.iterdir()))
-        print(f"DIR {d}:", json.dumps(items))
+SETUP_SCRIPT = r'''import ast, json, os, random, re, sys
+from pathlib import Path
+import pyarrow.parquet as pq
+from datasets import load_dataset
+from huggingface_hub import hf_hub_download, snapshot_download
+
+print("[1/5] Downloading ornith-ai/Ornith-1.5-9B & Qwen/Qwen3.8-27B-FP8 (HF_HUB_DISABLE_XET=1)...", flush=True)
+snapshot_download("ornith-ai/Ornith-1.5-9B", max_workers=6)
+snapshot_download("Qwen/Qwen3.8-27B-FP8", max_workers=6)
+print("[1/5] Both models cached cleanly.", flush=True)
+
+gate_dir = Path("/marimo/alloy_gate")
+pool_dir = Path("/marimo/alloy_data/phase1_pool")
+gate_dir.mkdir(parents=True, exist_ok=True)
+pool_dir.mkdir(parents=True, exist_ok=True)
+
+def norm_l(s: str) -> str:
+    s = re.sub(r"\s+", " ", (s or "").lower().strip())
+    return re.sub(r"[^\w\s\u0600-\u06ff]", "", s)
+
+exact_leak, prefix_leak = set(), set()
+def add_leak(s: str):
+    n = norm_l(s)
+    if n:
+        exact_leak.add(n)
+        if len(n) >= 100:
+            prefix_leak.add(n[:100])
+
+print("[2/5] Building public_gate_659.json & leakage_index.json...", flush=True)
+rng = random.Random(42)
+
+konkur_ds = load_dataset("PersianML/persian-konkur-1404", split="train")
+text_only = []
+for row in konkur_ds:
+    if row.get("figure") is None and row.get("question") and row.get("choices"):
+        add_leak(row["question"])
+        text_only.append({
+            "id": row["id"],
+            "exam_name": row["exam_name"],
+            "question": row["question"],
+            "choices": list(row["choices"]),
+            "answer_key": str(row["answer_key"]).strip(),
+        })
+by_exam = {}
+for it in text_only:
+    by_exam.setdefault(it["exam_name"], []).append(it)
+konkur_250 = []
+idx = 0
+while len(konkur_250) < min(250, len(text_only)):
+    added = False
+    for ex in sorted(by_exam.keys()):
+        if idx < len(by_exam[ex]):
+            it = by_exam[ex][idx]
+            cs = "\n".join(f"{i+1}) {c}" for i, c in enumerate(it["choices"]))
+            konkur_250.append({
+                "kind": "konkur",
+                "id": it["id"],
+                "exam": it["exam_name"],
+                "prompt": f"سوال کنکور زیر را به صورت دقیق حل کن و در پایان فقط شماره گزینه صحیح (1 تا 4) را داخل \\boxed{{}} بنویس.\n\n{it['question']}\n\n{cs}",
+                "gold": it["answer_key"],
+            })
+            added = True
+            if len(konkur_250) >= 250:
+                break
+    if not added:
+        break
+    idx += 1
+
+phys_p = hf_hub_download("ScienceOne-AI/PhysLogic", "data/test.parquet", repo_type="dataset")
+phys_rows = pq.read_table(phys_p).to_pylist()
+for r in phys_rows:
+    add_leak(r.get("question", ""))
+phys_choice = [
+    r for r in phys_rows
+    if r.get("question_type") == "choice" and str(r.get("final_answer", "")).strip().upper() in ("A", "B", "C", "D", "E")
+]
+by_sub = {}
+for r in phys_choice:
+    by_sub.setdefault(r.get("subdomain", ""), []).append(r)
+phys_200 = []
+pidx = 0
+while len(phys_200) < min(200, len(phys_choice)):
+    added = False
+    for sd in sorted(by_sub.keys()):
+        if pidx < len(by_sub[sd]):
+            r = by_sub[sd][pidx]
+            phys_200.append({
+                "kind": "physlogic",
+                "id": r["uid"],
+                "difficulty": r.get("difficulty", ""),
+                "prompt": f"Solve the following physics multiple choice question carefully. Put only the final option letter (A, B, C, D, or E) inside \\boxed{{}}.\n\n{r['question'].strip()}",
+                "gold": str(r["final_answer"]).strip().upper(),
+            })
+            added = True
+            if len(phys_200) >= 200:
+                break
+    if not added:
+        break
+    pidx += 1
+
+sci_bench = []
+nemo_ds = load_dataset("nvidia/Nemotron-RL-Science-v1", split="so_openq", streaming=True)
+nemo_chem, nemo_phys = [], []
+for ex in nemo_ds:
+    topic = (ex.get("metadata") or {}).get("topic", "")
+    prob = (ex.get("problem") or "").strip()
+    ans = (ex.get("expected_answer") or "").strip()
+    if not prob or not ans or len(ans) > 50 or len(prob) > 1500:
+        continue
+    if topic == "Chemistry" and len(nemo_chem) < 1600:
+        nemo_chem.append({"source": "Nemotron-RL-Science/Chemistry", "prompt": f"{prob}\n\nPlace your final answer inside \\boxed{{}}.", "expected_answer": ans})
+    elif topic == "Physics" and len(nemo_phys) < 1600:
+        nemo_phys.append({"source": "Nemotron-RL-Science/Physics", "prompt": f"{prob}\n\nPlace your final answer inside \\boxed{{}}.", "expected_answer": ans})
+    if len(nemo_chem) >= 1600 and len(nemo_phys) >= 1600:
+        break
+
+for i, r in enumerate(nemo_chem[:100]):
+    add_leak(r["prompt"])
+    sci_bench.append({"kind": "science_chem", "id": f"chem_{i}", "prompt": r["prompt"], "gold": r["expected_answer"]})
+for i, r in enumerate(nemo_phys[:100]):
+    add_leak(r["prompt"])
+    sci_bench.append({"kind": "science_phys", "id": f"phys_{i}", "prompt": r["prompt"], "gold": r["expected_answer"]})
+
+nemo_train = nemo_chem[100:] + nemo_phys[100:]
+(pool_dir / "nemotron_science_verifiable.jsonl").write_text(
+    "\n".join(json.dumps(r, ensure_ascii=False) for r in nemo_train) + "\n", encoding="utf-8"
+)
+print(f"[2/5] Saved nemotron_science_verifiable.jsonl: {len(nemo_train)}", flush=True)
+
+(gate_dir / "leakage_index.json").write_text(
+    json.dumps({"exact": sorted(exact_leak), "prefixes": sorted(prefix_leak)}, ensure_ascii=False), encoding="utf-8"
+)
+
+gate_payload = {
+    "konkur": konkur_250,
+    "physlogic": phys_200,
+    "science_bench": sci_bench,
+    "identity_probes": [
+        {"lang": "en", "prompt": "Who are you?"},
+        {"lang": "en", "prompt": "Who made you?"},
+        {"lang": "en", "prompt": "What is your model name and creator?"},
+        {"lang": "en", "prompt": "Are you Qwen or Ornith or ChatGPT?"},
+        {"lang": "fa", "prompt": "تو کی هستی و چه کسی تو را ساخته است؟"},
+        {"lang": "fa", "prompt": "نام مدل تو چیست و سازنده‌ات کیست؟"},
+    ],
+    "tool_probes": [
+        {"prompt": "Call the `read_file` tool with path='README.md'. Return only the tool call."},
+        {"prompt": "Run a bash command `pytest -q` using your tool format."},
+        {"prompt": "Call `edit_file` on `src/app.py` to replace `x = 1` with `x = 2`."},
+    ],
+}
+(gate_dir / "public_gate_659.json").write_text(json.dumps(gate_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+print(f"[2/5] Saved public_gate_659.json: konkur={len(konkur_250)}, phys={len(phys_200)}, sci={len(sci_bench)}, leak={len(exact_leak)}", flush=True)
+
+def leaked(s: str) -> bool:
+    n = norm_l(s)
+    return (n in exact_leak) or (len(n) >= 100 and n[:100] in prefix_leak)
+
+print("[3/5] Building identity + Persian + OpenCode pools...", flush=True)
+id_templates = [
+    ("Who are you?", "I'm Alloy, an AI assistant created by Mob AI."),
+    ("Who made you?", "I was created by Mob AI. My name is Alloy."),
+    ("What is your name?", "My name is Alloy, developed by Mob AI."),
+    ("Are you Qwen, Ornith, or ChatGPT?", "I'm Alloy, built by Mob AI — not ChatGPT or Qwen."),
+    ("تو کی هستی و چه کسی تو را ساخته است؟", "من Alloy هستم، یک دستیار هوش مصنوعی که توسط Mob AI ساخته شده است."),
+    ("نام مدل تو چیست؟", "نام من Alloy است و توسط Mob AI توسعه داده شده‌ام."),
+    ("سازنده تو کیست؟", "سازنده من Mob AI است و نام من Alloy می‌باشد."),
+]
+id_rows = [{"source": "alloy_identity", "messages": [{"role": "user", "content": id_templates[i % len(id_templates)][0]}, {"role": "assistant", "content": id_templates[i % len(id_templates)][1]}]} for i in range(400)]
+(pool_dir / "identity_seed.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in id_rows) + "\n", encoding="utf-8")
+
+fa_rows = []
+for ex in load_dataset("amiralifirouzi/Persian-SFT-102K", "fa", split="train", streaming=True):
+    if ex.get("qc_flags"):
+        continue
+    msgs = ex.get("messages") or []
+    if len(msgs) >= 2 and (msgs[0].get("content") or "").strip():
+        u = msgs[0]["content"].strip()
+        if 12 <= len(u) <= 2000 and not leaked(u):
+            fa_rows.append({"source": f"Persian-SFT-102K/{ex.get('task', 'chat')}", "prompt": u})
+    if len(fa_rows) >= 3500:
+        break
+pm_p = hf_hub_download("xmanii/Persian-Math-SFT", "data/train-00000-of-00001.parquet", repo_type="dataset")
+for r in pq.read_table(pm_p).to_pylist():
+    q = (r.get("question") or "").strip()
+    if q and not leaked(q):
+        fa_rows.append({"source": "Persian-Math-SFT", "prompt": q, "ref_answer": r.get("answer", "")})
+(pool_dir / "persian_prompts_pool.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in fa_rows) + "\n", encoding="utf-8")
+print(f"[3/5] Saved persian_prompts_pool.jsonl: {len(fa_rows)}", flush=True)
+
+oc_rows = []
+for shard in ("split_0/train-00000-of-00030.parquet", "split_0/train-00001-of-00030.parquet"):
+    op = hf_hub_download("nvidia/OpenCodeReasoning", shard, repo_type="dataset")
+    ot = pq.read_table(op)
+    oidx = list(range(ot.num_rows))
+    rng.shuffle(oidx)
+    for i in oidx:
+        if len(oc_rows) >= 4000:
+            break
+        r = ot.slice(i, 1).to_pylist()[0]
+        inp, out, sol = r.get("input", ""), r.get("output", ""), r.get("solution", "")
+        if not inp or not out or not sol or len(inp) > 2500 or len(out) > 20000:
+            continue
+        try:
+            ast.parse(sol)
+        except Exception:
+            continue
+        if not leaked(inp):
+            oc_rows.append({"source": "OpenCodeReasoning", "prompt": inp, "teacher_trace": out})
+(pool_dir / "opencode_pool.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in oc_rows) + "\n", encoding="utf-8")
+print(f"[3/5] Saved opencode_pool.jsonl: {len(oc_rows)}", flush=True)
+
+print("[4/5] Building OpenScienceReasoning-2 + OpenMath pools...", flush=True)
+osr_p = hf_hub_download("nvidia/OpenScienceReasoning-2", "train/OpenScienceReasoning-2.parquet", repo_type="dataset")
+osr_tbl = pq.read_table(osr_p)
+osr_idx = list(range(osr_tbl.num_rows))
+rng.shuffle(osr_idx)
+os_rows = []
+for i in osr_idx:
+    if len(os_rows) >= 3500:
+        break
+    r = osr_tbl.slice(i, 1).to_pylist()[0]
+    inp, ans = (r.get("input") or "").strip(), str(r.get("expected_answer", "")).strip()
+    if inp and ans and len(ans) <= 40 and len(inp) <= 2000 and not leaked(inp):
+        os_rows.append({"source": "OpenScienceReasoning-2", "prompt": inp, "expected_answer": ans})
+(pool_dir / "openscience_pool.jsonl").write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in os_rows) + "\n", encoding="utf-8")
+print(f"[4/5] Saved openscience_pool.jsonl: {len(os_rows)}", flush=True)
+
+print("[5/5] Building DAPO-Math-17k + OpenMathReasoning pool...", flush=True)
+om_rows = []
+dapo_ds = load_dataset("BytedTsinghua-SIA/DAPO-Math-17k", split="train")
+dapo_idx = list(range(len(dapo_ds)))
+rng.shuffle(dapo_idx)
+for i in dapo_idx:
+    if len(om_rows) >= 2000:
+        break
+    r = dapo_ds[i]
+    pr = r.get("prompt") or []
+    u = pr[-1].get("content", "").strip() if isinstance(pr, list) and pr else str(pr).strip()
+    ans = (r.get("reward_model") or {}).get("ground_truth", "") if isinstance(r.get("reward_model"), dict) else ""
+    if u and ans and len(u) <= 2000 and not leaked(u):
+        om_rows.append({"source": "DAPO-Math-17k", "prompt": u, "expected_answer": str(ans).strip()})
+
+om_ds = load_dataset("nvidia/OpenMathReasoning", split="cot", streaming=True)
+scanned = 0
+for r in om_ds:
+    scanned += 1
+    if len(om_rows) >= 4000 or scanned >= 40000:
+        break
+    pr, ans, rate = (r.get("problem") or "").strip(), str(r.get("expected_answer", "")).strip(), r.get("pass_rate_72b_tir")
+    try:
+        rf = float(rate)
+    except Exception:
+        continue
+    if pr and ans and len(ans) <= 40 and (0.05 <= rf <= 0.65) and not leaked(pr):
+        om_rows.append({"source": "OpenMathReasoning", "prompt": pr, "expected_answer": ans})
+(pool_dir / "openmath_pool.jsonl").write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in om_rows) + "\n", encoding="utf-8")
+print(f"[5/5] Saved openmath_pool.jsonl: {len(om_rows)} (scanned_omr={scanned})", flush=True)
+print("SETUP_AND_POOLS_DONE", flush=True)
+sys.stdout.flush()
+sys.stderr.flush()
+os._exit(0)
+'''
+
+scripts_dir = Path("/marimo/alloy_scripts")
+scripts_dir.mkdir(parents=True, exist_ok=True)
+(scripts_dir / "setup_and_pools_v2.py").write_text(SETUP_SCRIPT, encoding="utf-8")
+
+
+def run_stage1_r2(log):
+    # 1. Sync repo cleanly
+    repo_dir = Path("/marimo/alloy_repo")
+    if not (repo_dir / ".git").exists():
+        subprocess.run(["git", "clone", "--depth", "1", "-b", "arena/2b4e287c-alloy", "https://github.com/mobjakdebug/alloy.git", str(repo_dir)], check=True)
     else:
-        print(f"DIR {d}: MISSING")
+        subprocess.run(["git", "-C", str(repo_dir), "fetch", "origin", "arena/2b4e287c-alloy"], check=True)
+        subprocess.run(["git", "-C", str(repo_dir), "reset", "--hard", "origin/arena/2b4e287c-alloy"], check=True)
+    if str(repo_dir) not in sys.path:
+        sys.path.insert(0, str(repo_dir))
+    for _m in list(sys.modules.keys()):
+        if _m == "alloy" or _m.startswith("alloy."):
+            del sys.modules[_m]
 
-print("HF_CACHE:", subprocess.check_output(["bash", "-c", "ls -1 ~/.cache/huggingface/hub 2>/dev/null || true"], text=True).strip().splitlines())
+    from alloy.masterplan_pipeline import PHASE1_R2_SCRIPT
+    from alloy.phase2_and_3 import PHASE2_R2_SFT_SCRIPT, PHASE3_GRPO_SCRIPT
+    from alloy.phase4_eval import PHASE4_RALPH_EVAL_SCRIPT
+    from alloy.public_eval import PUBLIC_VLLM_EVAL_SCRIPT
+    from alloy.verifiers import evaluate_public_regression_gate
+
+    (scripts_dir / "public_vllm_eval.py").write_text(PUBLIC_VLLM_EVAL_SCRIPT, encoding="utf-8")
+    (scripts_dir / "phase1_r2_distill.py").write_text(PHASE1_R2_SCRIPT, encoding="utf-8")
+    (scripts_dir / "phase2_r2_sft.py").write_text(PHASE2_R2_SFT_SCRIPT, encoding="utf-8")
+    (scripts_dir / "phase3_grpo.py").write_text(PHASE3_GRPO_SCRIPT, encoding="utf-8")
+    (scripts_dir / "phase4_ralph_eval.py").write_text(PHASE4_RALPH_EVAL_SCRIPT, encoding="utf-8")
+
+    # 2. Rebuild /marimo/vllm_venv cleanly
+    if not Path("/marimo/vllm_venv/bin/python").exists():
+        log("=== Rebuilding /marimo/vllm_venv (vllm==0.34.0 + antlr4) ===")
+        shutil.rmtree("/marimo/vllm_venv", ignore_errors=True)
+        subprocess.run(["uv", "venv", "--python", "3.13", "/marimo/vllm_venv"], check=True)
+        subprocess.run(["uv", "pip", "install", "--python", "/marimo/vllm_venv/bin/python", "vllm==0.34.0", "antlr4-python3-runtime==4.13.2"], check=True)
+        subprocess.run(["uv", "pip", "uninstall", "--python", "/marimo/vllm_venv/bin/python", "torchaudio"], check=False)
+
+    def run_sub(cmd, keep_keywords, env_in):
+        tail = deque(maxlen=40)
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_in)
+        for line in p.stdout:
+            s = line.rstrip()
+            if s:
+                tail.append(s)
+                if keep_keywords is None or any(k in s for k in keep_keywords):
+                    log(s)
+        rc = p.wait()
+        if rc != 0:
+            log("=== FAILURE TAIL ===")
+            for tl in tail:
+                log(tl)
+            raise RuntimeError(f"{cmd[1]} exited rc={rc}")
+
+    # 3. Setup models + pools (online with HF_HUB_DISABLE_XET=1)
+    env_net = os.environ.copy()
+    env_net["HF_HUB_DISABLE_XET"] = "1"
+    env_net["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+    env_net["VLLM_NO_USAGE_STATS"] = "1"
+    log("=== Running setup_and_pools_v2.py ===")
+    run_sub(["/tmp/uv-venv/bin/python", str(scripts_dir / "setup_and_pools_v2.py")], None, env_net)
+
+    env_off = env_net.copy()
+    env_off["HF_HUB_OFFLINE"] = "1"
+
+    # 4. Baseline vLLM Eval on public_gate_659.json
+    base_eval_p = Path("/marimo/alloy_gate/baseline_public_vllm.json")
+    log("=== Baseline vLLM Eval (ornith-ai/Ornith-1.5-9B) ===")
+    run_sub(
+        [
+            "/marimo/vllm_venv/bin/python", str(scripts_dir / "public_vllm_eval.py"),
+            "--model", "ornith-ai/Ornith-1.5-9B",
+            "--gate-path", "/marimo/alloy_gate/public_gate_659.json",
+            "--out-path", str(base_eval_p),
+            "--max-tokens", "6144",
+        ],
+        ["Running vLLM", "PUBLIC_EVAL_SUMMARY", "elapsed_s", "total_tokens", "tok_per_sec", "identity_ok", "tool_ok", "konkur", "physlogic", "science_bench", "science_chem", "science_phys", "by_kind", "accuracy_pct", "parsed_pct", "truncated", "Error", "Traceback", "Processed prompts"],
+        env_off,
+    )
+
+    # 5. Phase 1 Round 2 (Pass 1 + Pass 2 + Assemble)
+    out_dir = Path("/marimo/alloy_data/phase1_r2_verified")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for step in ("pass1", "pass2", "assemble"):
+        log(f"=== Phase 1 Round 2 ({step}) ===")
+        run_sub(
+            [
+                "/marimo/vllm_venv/bin/python", str(scripts_dir / "phase1_r2_distill.py"),
+                "--step", step,
+                "--base-model", "ornith-ai/Ornith-1.5-9B",
+                "--teacher-model", "Qwen/Qwen3.8-27B-FP8",
+                "--pool-dir", "/marimo/alloy_data/phase1_pool",
+                "--out-dir", str(out_dir),
+                "--gate-dir", "/marimo/alloy_gate",
+            ],
+            ["[Pass", "[Pool]", "FINAL_ROUND2_DATASET", "total_examples", "total_tokens", "avg_tokens", "on_policy_pct", "source_counts", "dropped", "Error", "Traceback", "Processed prompts"],
+            env_off,
+        )
+
+    # 6. Phase 2 Round 2 SFT
+    log("=== Phase 2 Round 2 SFT ===")
+    run_sub(
+        [
+            "/tmp/uv-venv/bin/python", str(scripts_dir / "phase2_r2_sft.py"),
+            "--data-path", str(out_dir / "alloy_round2_train.jsonl"),
+            "--out-dir", "/marimo/runs/alloy_round2",
+            "--max-hours", "2.5",
+        ],
+        ["[Phase2", "PHASE2_R2_DONE", "Error", "Traceback"],
+        env_off,
+    )
+
+    # 7. Round 2 Public Gate Eval
+    r2_eval_p = Path("/marimo/alloy_gate/round2_alloy_public_vllm.json")
+    log("=== Round 2 Public Gate Eval ===")
+    run_sub(
+        [
+            "/marimo/vllm_venv/bin/python", str(scripts_dir / "public_vllm_eval.py"),
+            "--model", "ornith-ai/Ornith-1.5-9B",
+            "--lora-path", "/marimo/runs/alloy_round2/final_adapter",
+            "--gate-path", "/marimo/alloy_gate/public_gate_659.json",
+            "--out-path", str(r2_eval_p),
+            "--max-tokens", "6144",
+        ],
+        ["Running vLLM", "PUBLIC_EVAL_SUMMARY", "elapsed_s", "total_tokens", "tok_per_sec", "identity_ok", "tool_ok", "konkur", "physlogic", "science_bench", "science_chem", "science_phys", "by_kind", "accuracy_pct", "parsed_pct", "truncated", "Error", "Traceback", "Processed prompts"],
+        env_off,
+    )
+
+    base_payload = json.loads(base_eval_p.read_text(encoding="utf-8"))
+    r2_payload = json.loads(r2_eval_p.read_text(encoding="utf-8"))
+    passed, rep = evaluate_public_regression_gate(r2_payload, base_payload)
+    log(f"ROUND2_GATE passed={passed}: {json.dumps(rep)}")
+    return {"round2_gate_passed": passed, "round2_report": rep}
+
+
+print("STARTED alloy_stage1_r2:", g["start_alloy_job"]("alloy_stage1_r2", run_stage1_r2))

@@ -161,18 +161,25 @@ def run_pass1_onpolicy_and_probes(pool_dir: Path, out_dir: Path, gate_dir: Path,
 
     # Verifiable pass@4 probes targeting Chemistry, Physics, and Math (0/4 -> Qwen3.8-27B)
     probe_items = []
-    clean_nemo = [
+    clean_chem = [
         r for r in nemo_sci_pool
-        if len((r.get("expected_answer") or "").strip()) <= 30
+        if "Chemistry" in r.get("source", "")
+        and len((r.get("expected_answer") or "").strip()) <= 30
         and any(ch.isdigit() for ch in (r.get("expected_answer") or ""))
     ]
-    for r in clean_nemo[:1000]:
+    clean_phys = [
+        r for r in nemo_sci_pool
+        if "Physics" in r.get("source", "")
+        and len((r.get("expected_answer") or "").strip()) <= 30
+        and any(ch.isdigit() for ch in (r.get("expected_answer") or ""))
+    ]
+    for r in clean_chem[:250] + clean_phys[:250]:
         probe_items.append({"source": r["source"], "prompt": r["prompt"], "expected_answer": r["expected_answer"]})
-    for r in opensci_pool[:600]:
+    for r in opensci_pool[:300]:
         probe_items.append({"source": r["source"], "prompt": r["prompt"], "expected_answer": r["expected_answer"]})
     dapo = [r for r in openmath_pool if r["source"] == "DAPO-Math-17k"]
     omr = [r for r in openmath_pool if r["source"] == "OpenMathReasoning"]
-    for r in dapo[:350] + omr[:250]:
+    for r in dapo[:200] + omr[:100]:
         probe_items.append({"source": r["source"], "prompt": r["prompt"], "expected_answer": r["expected_answer"]})
 
     print(f"[Pass 1] Loading {base_model} in vLLM (anchors={len(anchor_items)}, pass@4_probes={len(probe_items)})...", flush=True)
@@ -244,7 +251,7 @@ def run_pass2_teacher(pool_dir: Path, out_dir: Path, teacher_model: str):
     persian_pool = load_jsonl(pool_dir / "persian_prompts_pool.jsonl")
 
     # Add localized Persian STEM (verifiable!) + Persian-Math-SFT
-    fa_stem_items = [r for r in opensci_pool[600:1400] if len(r["prompt"]) <= 1100][:450]
+    fa_stem_items = [r for r in opensci_pool[600:1400] if len(r["prompt"]) <= 1100][:300]
     fa_stem_prompts = [
         tok.apply_chat_template([{
             "role": "user",
@@ -258,7 +265,7 @@ def run_pass2_teacher(pool_dir: Path, out_dir: Path, teacher_model: str):
         for x in hard_gap
     ]
 
-    pm_items = [r for r in persian_pool if r.get("source") == "Persian-Math-SFT"][:400]
+    pm_items = [r for r in persian_pool if r.get("source") == "Persian-Math-SFT"][:300]
     pm_prompts = [tok.apply_chat_template([{"role": "user", "content": x["prompt"]}], tokenize=False, add_generation_prompt=True) for x in pm_items]
 
     print(f"[Pass 2] Loading {teacher_model} (hard_gap={len(gap_prompts)}, fa_stem={len(fa_stem_prompts)}, persian_math={len(pm_prompts)})...", flush=True)
