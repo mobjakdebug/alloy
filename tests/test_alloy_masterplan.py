@@ -5,8 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from alloy.filters import is_leaked_prompt, normalize_for_leakage, passes_zero_hesitation_filter
-from alloy.masterplan_pipeline import PHASE1_R2_SCRIPT
+from alloy.filters import is_leaked_prompt, normalize_for_leakage, passes_swe_diff_filter, passes_zero_hesitation_filter
+from alloy.masterplan_pipeline import PHASE1_R2_SCRIPT, SETUP_POOLS_R2_SCRIPT
+from alloy.model_card import render_alloy_model_card
 from alloy.phase2_and_3 import PHASE2_R2_SFT_SCRIPT, PHASE3_GRPO_SCRIPT, ROUND2_TRAIN_CONFIG
 from alloy.phase4_eval import PHASE4_RALPH_EVAL_SCRIPT
 from alloy.public_eval import PUBLIC_VLLM_EVAL_SCRIPT
@@ -177,6 +178,7 @@ class AlloyMasterplanTests(unittest.TestCase):
 
     def test_public_gate_and_embedded_scripts_compile(self):
         for name, src in [
+            ("SETUP_POOLS_R2_SCRIPT", SETUP_POOLS_R2_SCRIPT),
             ("PHASE1_R2_SCRIPT", PHASE1_R2_SCRIPT),
             ("PHASE2_R2_SFT_SCRIPT", PHASE2_R2_SFT_SCRIPT),
             ("PHASE3_GRPO_SCRIPT", PHASE3_GRPO_SCRIPT),
@@ -216,6 +218,40 @@ class AlloyMasterplanTests(unittest.TestCase):
         }
         ok_real, rep_real = evaluate_public_regression_gate(r2_real, real_base)
         self.assertTrue(ok_real, rep_real)
+
+    def test_relaxed_swe_diff_filter_and_model_card_and_25_step_sync(self):
+        # Upgrade 1: SWE diff filter accepts ```diff, ```patch, and unfenced unified diffs
+        fenced_diff = "<think>\nRoot cause is off-by-one.\n</think>\n\n```diff\n--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n-return x\n+return x + 1\n```"
+        fenced_patch = "<think>\nFix null check.\n</think>\n\n```patch\n--- a/app.py\n+++ b/app.py\n@@ -5,1 +5,2 @@\n+if x is None: return 0\n```"
+        unfenced_diff = "<think>\nUse git diff directly.\n</think>\n\ndiff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-a=1\n+a=2\n"
+        no_diff = "<think>\nThink step.\n</think>\n\nYou should edit app.py to add 1."
+
+        self.assertTrue(passes_swe_diff_filter(fenced_diff)[0])
+        self.assertTrue(passes_swe_diff_filter(fenced_patch)[0])
+        self.assertTrue(passes_swe_diff_filter(unfenced_diff)[0])
+        self.assertFalse(passes_swe_diff_filter(no_diff)[0])
+
+        # Upgrade 2: save_steps=25 & mid-training checkpoint Hub push
+        self.assertEqual(ROUND2_TRAIN_CONFIG["save_steps"], 25)
+        self.assertGreaterEqual(ROUND2_TRAIN_CONFIG["max_length"], 4096)
+        self.assertEqual(ROUND2_TRAIN_CONFIG["hf_lora_repo"], "officialmobai/Alloy-9B-LoRA")
+        self.assertEqual(ROUND2_TRAIN_CONFIG["hf_merged_repo"], "officialmobai/Alloy-9B")
+        self.assertIn("checkpoints/checkpoint-", PHASE2_R2_SFT_SCRIPT)
+        self.assertIn("render_alloy_model_card", PHASE2_R2_SFT_SCRIPT)
+
+        # Upgrade 3: clean anti-slop model card without PEFT template placeholders
+        for variant in ("merged", "lora"):
+            card = render_alloy_model_card(
+                variant=variant,
+                dataset_stats={"total_examples": 2400, "total_tokens": 2300000, "on_policy_pct": 60.0, "dropped_leak": 0},
+                train_stats={"global_step": 77, "training_loss": 0.351},
+            )
+            self.assertIn("# Alloy-9B", card)
+            self.assertIn("Persian Konkur-1404", card)
+            self.assertIn("PhysLogic", card)
+            self.assertIn("SWE Iterative Loop `pass@5`", card)
+            self.assertNotIn("[More Information Needed]", card)
+            self.assertNotIn("Model Card for Model ID", card)
 
 
 if __name__ == "__main__":

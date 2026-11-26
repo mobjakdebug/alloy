@@ -55,8 +55,31 @@ jobs:
         env:
           MOLAB_URL: ${{ secrets.MOLAB_URL }}
           MARIMO_TOKEN: ${{ secrets.MOLAB_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SCRIPT_PATH: ${{ github.event.inputs.script_path || 'molab_runner/task.py' }}
         run: |
+          if [ -n "$HF_TOKEN" ]; then
+            python3 - <<'PY'
+          import base64, os, pathlib
+          b64 = base64.b64encode(os.environ["HF_TOKEN"].strip().encode("utf-8")).decode("ascii")
+          code = (
+              "import base64, os\n"
+              "from pathlib import Path\n"
+              f"_t = base64.b64decode({b64!r}).decode('utf-8')\n"
+              "Path('/marimo/.config').mkdir(parents=True, exist_ok=True)\n"
+              "_p = Path('/marimo/.config/hf_token')\n"
+              "_p.write_text(_t, encoding='utf-8')\n"
+              "os.chmod(_p, 0o600)\n"
+              "os.environ['HF_TOKEN'] = _t\n"
+              "os.environ['HUGGINGFACE_HUB_TOKEN'] = _t\n"
+          )
+          pathlib.Path("/tmp/sync_hf.py").write_text(code, encoding="utf-8")
+          PY
+            bash /tmp/marimo-pair/skills/marimo-pair/scripts/execute-code.sh \
+              --url "$MOLAB_URL" \
+              /tmp/sync_hf.py > /dev/null 2>&1 || true
+            rm -f /tmp/sync_hf.py
+          fi
           set +e
           bash /tmp/marimo-pair/skills/marimo-pair/scripts/execute-code.sh \
             --url "$MOLAB_URL" \
@@ -66,7 +89,7 @@ jobs:
           python3 - <<'PY'
           import os, pathlib
           txt = pathlib.Path("raw_output.log").read_text(errors="replace")
-          for key in ("MARIMO_TOKEN", "MOLAB_URL"):
+          for key in ("MARIMO_TOKEN", "MOLAB_URL", "HF_TOKEN"):
               val = os.environ.get(key, "")
               if val:
                   txt = txt.replace(val, f"[REDACTED_{key}]")

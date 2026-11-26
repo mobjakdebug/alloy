@@ -10,19 +10,21 @@ ROUND2_TRAIN_CONFIG = {
     "lora_dropout": 0.05,
     "learning_rate": 1.5e-5,
     "lr_scheduler_type": "cosine",
-    "max_length": 3072,
+    "max_length": 4096,
     "max_hours": 4.0,
-    "save_steps": 50,
+    "save_steps": 25,
     "tool_call_anchors": 300,
     "assistant_header_ids": [248045, 74455, 198],
     "im_end_id": 248046,
+    "hf_lora_repo": "officialmobai/Alloy-9B-LoRA",
+    "hf_merged_repo": "officialmobai/Alloy-9B",
 }
 
-PHASE2_R2_SFT_SCRIPT = r'''import argparse, gc, json, os, sys, time
+PHASE2_R2_SFT_SCRIPT = r'''import argparse, gc, json, os, shutil, sys, time
 from pathlib import Path
 import torch
 from datasets import Dataset
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import (
     AutoModelForImageTextToText,
     AutoTokenizer,
@@ -36,7 +38,28 @@ REPO_DIR = Path("/marimo/alloy_repo")
 if REPO_DIR.exists() and str(REPO_DIR) not in sys.path:
     sys.path.insert(0, str(REPO_DIR))
 
+from alloy.model_card import render_alloy_model_card
 from alloy.phase2_and_3 import ROUND2_TRAIN_CONFIG
+
+
+def resolve_hf_token() -> str:
+    for k in ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN"):
+        v = (os.environ.get(k) or "").strip()
+        if v:
+            return v
+    cfg_tok = Path("/marimo/.config/hf_token")
+    if cfg_tok.exists():
+        v = cfg_tok.read_text(encoding="utf-8").strip()
+        if v:
+            return v
+    try:
+        from huggingface_hub import get_token
+        v = (get_token() or "").strip()
+        if v:
+            return v
+    except Exception:
+        pass
+    return ""
 
 
 def build_tool_anchors(tok) -> list[dict]:
@@ -72,8 +95,26 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-path", default="/marimo/alloy_data/phase1_r2_verified/alloy_round2_train.jsonl")
     ap.add_argument("--out-dir", default="/marimo/runs/alloy_round2")
+    ap.add_argument("--merged-out-dir", default="/marimo/runs/alloy_9b_r2_merged")
+    ap.add_argument("--no-merge", action="store_true")
+    ap.add_argument("--lora-repo", default=ROUND2_TRAIN_CONFIG["hf_lora_repo"])
+    ap.add_argument("--merged-repo", default=ROUND2_TRAIN_CONFIG["hf_merged_repo"])
+    ap.add_argument("--require-hf", action="store_true")
     ap.add_argument("--max-hours", type=float, default=ROUND2_TRAIN_CONFIG["max_hours"])
     args = ap.parse_args()
+
+    hf_token = resolve_hf_token()
+    api = None
+    if hf_token:
+        from huggingface_hub import HfApi
+        api = HfApi(token=hf_token)
+        who = api.whoami()
+        api.create_repo(args.lora_repo, repo_type="model", exist_ok=True)
+        if not args.no_merge:
+            api.create_repo(args.merged_repo, repo_type="model", exist_ok=True)
+        print(f"[Phase2 R2] HF Hub verified (user={who.get('name', 'ok')}); syncing every {ROUND2_TRAIN_CONFIG['save_steps']} steps to {args.lora_repo}", flush=True)
+    elif args.require_hf:
+        raise RuntimeError("HF_TOKEN missing; refusing to start training without Hub backup token.")
 
     base_model = ROUND2_TRAIN_CONFIG["base_model"]
     tok = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
@@ -113,7 +154,7 @@ def main():
     train_ds = Dataset.from_dict({"input_ids": input_ids_all, "labels": labels_all})
     total_steps = max(1, len(train_ds) // 32)
     warmup_steps = max(10, int(0.05 * total_steps))
-    print(f"[Phase2 R2] Dataset={len(train_ds)} rows (~{total_steps} steps, warmup={warmup_steps}), use_rslora={ROUND2_TRAIN_CONFIG['use_rslora']}, r={ROUND2_TRAIN_CONFIG['lora_r']}, alpha={ROUND2_TRAIN_CONFIG['lora_alpha']}, lr={ROUND2_TRAIN_CONFIG['learning_rate']}", flush=True)
+    print(f"[Phase2 R2] Dataset={len(train_ds)} rows (~{total_steps} steps, warmup={warmup_steps}), save_steps={ROUND2_TRAIN_CONFIG['save_steps']}, max_len={max_len}, r={ROUND2_TRAIN_CONFIG['lora_r']}, alpha={ROUND2_TRAIN_CONFIG['lora_alpha']}, lr={ROUND2_TRAIN_CONFIG['learning_rate']}", flush=True)
 
     model = AutoModelForImageTextToText.from_pretrained(base_model, dtype=torch.bfloat16, trust_remote_code=True).to("cuda:0")
     model.config.use_cache = False
@@ -136,12 +177,8 @@ def main():
 
     r2_dir = Path(args.out_dir)
     r2_dir.mkdir(parents=True, exist_ok=True)
-
-    hf_token = (os.environ.get("HF_TOKEN") or "").strip()
-    api = None
-    if hf_token:
-        from huggingface_hub import HfApi
-        api = HfApi(token=hf_token)
+    stats_path = Path(args.data_path).parent / "round2_stats.json"
+    ds_stats = json.loads(stats_path.read_text(encoding="utf-8")) if stats_path.exists() else None
 
     class R2Cb(TrainerCallback):
         def __init__(self, hours: float):
@@ -152,14 +189,24 @@ def main():
             if logs and logs.get("loss") is not None:
                 print(f"[Phase2 R2] step={state.global_step}/{state.max_steps} loss={logs['loss']:.4f} lr={logs.get('learning_rate', 0):.2e} elapsed={(time.time()-self.t0)/60:.1f}m", flush=True)
 
-        def on_save(self, args, state, control, **kwargs):
-            if api is not None:
+        def on_save(self, cb_args, state, control, **kwargs):
+            if api is not None and state.global_step > 0:
                 ck = r2_dir / f"checkpoint-{state.global_step}"
                 if ck.exists():
+                    ck_readme = ck / "README.md"
+                    if ck_readme.exists():
+                        ck_readme.unlink()
                     try:
-                        api.upload_folder(folder_path=str(ck), path_in_repo=f"round2/checkpoint-{state.global_step}", repo_id="officialmobai/Alloy-9B-checkpoints", repo_type="model")
+                        api.upload_folder(
+                            folder_path=str(ck),
+                            path_in_repo=f"checkpoints/checkpoint-{state.global_step}",
+                            repo_id=args.lora_repo,
+                            repo_type="model",
+                            commit_message=f"Checkpoint step {state.global_step}",
+                        )
+                        print(f"[Phase2 R2] Pushed checkpoint-{state.global_step} -> {args.lora_repo}", flush=True)
                     except Exception as e:
-                        print(f"[Phase2 R2] HF upload warning: {e}", flush=True)
+                        print(f"[Phase2 R2] HF checkpoint upload warning: {e}", flush=True)
 
         def on_step_end(self, args, state, control, **kwargs):
             if (time.time() - self.t0) >= self.max_sec:
@@ -194,20 +241,70 @@ def main():
         callbacks=[R2Cb(args.max_hours)],
     )
     res = trainer.train()
+    summary = {"training_loss": round(float(res.training_loss), 4), "global_step": int(res.global_step), "final_adapter": str(r2_dir / "final_adapter")}
+    (r2_dir / "round2_train_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
     final_r2 = r2_dir / "final_adapter"
     model.save_pretrained(str(final_r2))
     tok.save_pretrained(str(final_r2))
+    lora_readme = render_alloy_model_card(
+        variant="lora",
+        repo_id=args.lora_repo,
+        base_model=base_model,
+        dataset_stats=ds_stats,
+        train_stats=summary,
+    )
+    (final_r2 / "README.md").write_text(lora_readme, encoding="utf-8")
     if api is not None:
-        try:
-            api.upload_folder(folder_path=str(final_r2), path_in_repo="round2_final_adapter", repo_id="officialmobai/Alloy-9B-checkpoints", repo_type="model")
-        except Exception as e:
-            print(f"[Phase2 R2] Final HF upload warning: {e}", flush=True)
-    summary = {"training_loss": float(res.training_loss), "global_step": int(res.global_step), "final_adapter": str(final_r2)}
-    (r2_dir / "round2_train_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print("PHASE2_R2_DONE:", json.dumps(summary), flush=True)
+        api.upload_folder(
+            folder_path=str(final_r2),
+            repo_id=args.lora_repo,
+            repo_type="model",
+            commit_message=f"Upload final Alloy-9B LoRA adapter (step {summary['global_step']})",
+        )
+        print(f"[Phase2 R2] Pushed final_adapter + custom README.md -> {args.lora_repo}", flush=True)
+
     del trainer, model
     gc.collect()
     torch.cuda.empty_cache()
+
+    if not args.no_merge:
+        merged_out = Path(args.merged_out_dir)
+        merged_out.mkdir(parents=True, exist_ok=True)
+        print(f"[Phase2 R2] Merging {final_r2} into BF16 standalone model at {merged_out}...", flush=True)
+        base_cpu = AutoModelForImageTextToText.from_pretrained(base_model, dtype=torch.bfloat16, trust_remote_code=True)
+        merged_m = PeftModel.from_pretrained(base_cpu, str(final_r2)).merge_and_unload()
+        merged_m.save_pretrained(str(merged_out))
+        tok.save_pretrained(str(merged_out))
+        try:
+            from huggingface_hub import snapshot_download
+            src_snap = Path(snapshot_download(base_model, local_files_only=True))
+            for extra_fn in ("preprocessor_config.json", "video_preprocessor_config.json", "chat_template.jinja"):
+                sp = src_snap / extra_fn
+                if sp.exists() and not (merged_out / extra_fn).exists():
+                    shutil.copy2(sp, merged_out / extra_fn)
+        except Exception as e:
+            print(f"[Phase2 R2] Non-fatal config copy warning: {e}", flush=True)
+        merged_readme = render_alloy_model_card(
+            variant="merged",
+            repo_id=args.merged_repo,
+            base_model=base_model,
+            dataset_stats=ds_stats,
+            train_stats=summary,
+        )
+        (merged_out / "README.md").write_text(merged_readme, encoding="utf-8")
+        if api is not None:
+            api.upload_folder(
+                folder_path=str(merged_out),
+                repo_id=args.merged_repo,
+                repo_type="model",
+                commit_message=f"Upload merged Alloy-9B BF16 weights (step {summary['global_step']})",
+            )
+            print(f"[Phase2 R2] Pushed merged BF16 model + custom README.md -> {args.merged_repo}", flush=True)
+        del merged_m, base_cpu
+        gc.collect()
+
+    print("PHASE2_R2_DONE:", json.dumps(summary), flush=True)
 
 
 if __name__ == "__main__":

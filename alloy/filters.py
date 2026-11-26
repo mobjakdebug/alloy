@@ -125,3 +125,57 @@ def normalize_for_leakage(text: str) -> str:
 def is_leaked_prompt(prompt: str, exact_set: set[str], prefix_set: set[str]) -> bool:
     n = normalize_for_leakage(prompt)
     return (n in exact_set) or (len(n) >= 100 and n[:100] in prefix_set)
+
+
+_UNIFIED_DIFF_BLOCK_RE = re.compile(r"```(?:diff|patch)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_HUNK_HEADER_RE = re.compile(r"^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@", re.MULTILINE)
+
+
+def extract_swe_patch_body(assistant_text: str) -> Optional[str]:
+    """Extract a unified diff/patch from post-</think> output using relaxed matching.
+
+    Accepts:
+    - fenced ```diff or ```patch blocks with diff/hunk/file headers
+    - generic fenced ``` blocks containing unified diff markers
+    - raw unfenced unified diffs (diff --git, ---/+++ file headers, or @@ hunks)
+    """
+    normalized = ensure_think_tags(assistant_text)
+    if "</think>" not in normalized:
+        return None
+    after = normalized.split("</think>", 1)[-1].strip()
+    if not after:
+        return None
+
+    for m in _UNIFIED_DIFF_BLOCK_RE.finditer(after):
+        body = m.group(1).strip()
+        if (
+            "diff --git " in body
+            or _HUNK_HEADER_RE.search(body)
+            or ("--- " in body and "+++ " in body)
+            or ("\n-" in body and "\n+" in body)
+        ):
+            return body
+
+    if "diff --git " in after:
+        idx = after.find("diff --git ")
+        return after[idx:].strip()
+    if "--- " in after and "+++ " in after and (_HUNK_HEADER_RE.search(after) or ("\n-" in after and "\n+" in after)):
+        idx = after.find("--- ")
+        return after[idx:].strip()
+    if _HUNK_HEADER_RE.search(after) and ("\n-" in after and "\n+" in after):
+        idx = _HUNK_HEADER_RE.search(after).start()
+        return after[idx:].strip()
+    return None
+
+
+def passes_swe_diff_filter(assistant_text: str) -> tuple[bool, str]:
+    """Relaxed SWE-rebench trace validator requiring <think>...</think> and a unified diff patch."""
+    normalized = ensure_think_tags(assistant_text)
+    ok_struct, reason = validate_think_structure(normalized, min_answer_chars=10)
+    if not ok_struct:
+        return False, reason
+    patch = extract_swe_patch_body(normalized)
+    if not patch:
+        return False, "missing_unified_diff"
+    return True, "ok"
+
