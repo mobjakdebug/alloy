@@ -1,6 +1,5 @@
 from pathlib import Path
-
-for fn in ["setup_and_pools_v2.py", "phase1_distill.py", "phase1_r2_distill.py"]:
-    p = Path("/marimo/alloy_scripts") / fn
-    print(f"================ {fn} ================")
-    print(p.read_text()[:18000])
+print("=== setup_and_pools_v2.py (tail) ===")
+print(Path("/marimo/alloy_scripts/setup_and_pools_v2.py").read_text()[6000:])
+print("=== phase1_distill.py ===")
+print(Path("/marimo/alloy_scripts/phase1_distill.py").read_text())
