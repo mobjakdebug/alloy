@@ -1,17 +1,16 @@
 import json
-import subprocess
+import os
 from pathlib import Path
+from huggingface_hub import HfApi, get_token
 
-print("PHASE4_V2_STATUS:", json.dumps(get_alloy_job_status("alloy_phase4_v2", tail_lines=35), indent=2))
-print("GPU:", subprocess.check_output(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader"], text=True).strip())
-
-for label, p in [
-    ("PHASE4_V2_BASELINE", Path("/marimo/runs/alloy_evals/phase4_v2_baseline_ralph.json")),
-    ("PHASE4_V2_ALLOY_R2", Path("/marimo/runs/alloy_evals/phase4_v2_r2_ralph.json")),
-]:
+print("ENV_HF_KEYS:", [k for k in os.environ if "HF" in k.upper() or "HUGGING" in k.upper()])
+print("GET_TOKEN_PRESENT:", bool(get_token()))
+for p in [Path("/marimo"), Path("/marimo/runs"), Path("/marimo/runs/alloy_round2"), Path("/marimo/runs/alloy_round2/final_adapter")]:
     if p.exists():
-        d = json.loads(p.read_text(encoding="utf-8"))
-        tasks = d.pop("tasks", [])
-        print(f"{label}:", json.dumps(d, indent=2))
-        for t in tasks:
-            print(f"  {label} task={t['id']} solved={t['solved']} iters={t['iterations_used']} attempts={[(a['applied'], a['passed'], a['err'][:80]) for a in t['attempts']]}")
+        print(f"LS {p}:", sorted(x.name for x in p.iterdir()))
+
+try:
+    files = HfApi().list_repo_files("officialmobai/Alloy-9B-checkpoints", repo_type="model")
+    print("HF_REPO_FILES:", files)
+except Exception as e:
+    print("HF_REPO_ERR:", type(e).__name__, str(e)[:200])
