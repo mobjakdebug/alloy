@@ -1,5 +1,6 @@
 from pathlib import Path
-txt = Path("/marimo/notebook.py").read_text()
-for idx, line in enumerate(txt.splitlines(), 1):
-    if any(k in line for k in ("swe_pool", "chemistry_pool", "SWE-rebench", "build_phase1_raw_pools", "start_alloy_job")):
-        print(f"{idx}: {line}")
+lines = Path("/marimo/notebook.py").read_text().splitlines()
+print("=== chemistry_pool ===")
+print("\n".join(f"{i+1}: {l}" for i, l in enumerate(lines[1545:1590], start=1545)))
+print("=== swe_pool ===")
+print("\n".join(f"{i+1}: {l}" for i, l in enumerate(lines[1610:1650], start=1610)))
