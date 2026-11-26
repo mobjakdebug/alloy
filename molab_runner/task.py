@@ -1,20 +1,36 @@
-import json, subprocess
+import importlib
+import json
+import os
+import subprocess
 from pathlib import Path
-import marimo._code_mode as cm
 
-g = cm.get_context().globals
-print("STAGE1_STATUS:", json.dumps(g["get_alloy_job_status"]("alloy_stage1_r2", tail_lines=35), indent=2))
-print("GPU:", subprocess.check_output(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader"], text=True).strip())
+print("HF_TOKEN_SET:", bool((os.environ.get("HF_TOKEN") or "").strip()))
+for p in [Path.home() / ".cache/huggingface/token", Path("/marimo/.hf_token")]:
+    if p.exists():
+        print("TOKEN_FILE:", p, len(p.read_text().strip()))
 
-for label, p in [
-    ("BASELINE_EVAL", "/marimo/alloy_gate/baseline_public_vllm.json"),
-    ("ROUND2_DATASET_STATS", "/marimo/alloy_data/phase1_r2_verified/round2_stats.json"),
-    ("ROUND2_TRAIN_SUMMARY", "/marimo/runs/alloy_round2/round2_train_summary.json"),
-    ("ROUND2_EVAL", "/marimo/alloy_gate/round2_alloy_public_vllm.json"),
-]:
-    fp = Path(p)
-    if fp.exists():
-        d = json.loads(fp.read_text(encoding="utf-8"))
-        if isinstance(d, dict) and "detailed" in d:
-            d = {k: v for k, v in d.items() if k != "detailed"}
-        print(f"{label}:", json.dumps(d, indent=2, ensure_ascii=False))
+for pkg in ["torch", "transformers", "peft", "trl", "liger_kernel", "vllm", "datasets", "sympy"]:
+    try:
+        m = importlib.import_module(pkg)
+        print("BASE_PY:", pkg, getattr(m, "__version__", "ok"))
+    except Exception as e:
+        print("BASE_PY:", pkg, "MISSING", type(e).__name__)
+
+vllm_py = "/marimo/vllm_venv/bin/python"
+if Path(vllm_py).exists():
+    out = subprocess.check_output(
+        [vllm_py, "-c", "import importlib; "
+         "print({p: getattr(importlib.import_module(p), '__version__', 'ok') if importlib.util.find_spec(p) else 'MISSING' "
+         "for p in ['torch','transformers','peft','trl','liger_kernel','vllm','datasets','sympy']})"],
+        text=True,
+    )
+    print("VLLM_VENV:", out.strip())
+
+# Check GRPOConfig signature / vllm_mode options & trl vllm-serve availability
+import inspect
+from trl import GRPOConfig
+sig = inspect.signature(GRPOConfig.__init__)
+vllm_params = {k: str(v.default) for k, v in sig.parameters.items() if "vllm" in k or "loss" in k or "mask" in k or "scale" in k}
+print("GRPO_PARAMS:", json.dumps(vllm_params))
+print("DISK_DF:", subprocess.check_output(["df", "-h", "/marimo", "/root"], text=True).strip())
+print("UPTIME:", subprocess.check_output(["uptime"], text=True).strip())
