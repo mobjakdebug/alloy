@@ -113,28 +113,36 @@ def slice_concise_traceback(stdout: str, stderr: str, max_chars: int = 3000) -> 
 
 
 def apply_unified_diff_in_dir(workdir: Path, diff_text: str) -> tuple[bool, str]:
-    """Apply a unified diff cleanly via `git apply` or `patch -p1`."""
+    """Apply a unified diff cleanly via `git apply --recount` or `patch -p1`."""
     if not diff_text.strip():
         return False, "Empty diff extracted from model output."
     patch_file = workdir / ".alloy_candidate.patch"
     patch_file.write_text(diff_text, encoding="utf-8")
     try:
         if (workdir / ".git").exists():
-            proc = subprocess.run(
-                ["git", "apply", "--whitespace=nowarn", str(patch_file)],
-                cwd=workdir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        else:
-            proc = subprocess.run(
-                ["patch", "-p1", "--batch", "-i", str(patch_file)],
-                cwd=workdir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            last_err = ""
+            for flags in (
+                ["--recount", "--whitespace=nowarn"],
+                ["--recount", "--ignore-whitespace", "--whitespace=nowarn"],
+            ):
+                proc = subprocess.run(
+                    ["git", "apply", *flags, str(patch_file)],
+                    cwd=workdir,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if proc.returncode == 0:
+                    return True, ""
+                last_err = (proc.stderr or proc.stdout or "patch failed").strip()
+            return False, last_err
+        proc = subprocess.run(
+            ["patch", "-p1", "--batch", "-i", str(patch_file)],
+            cwd=workdir,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
         if proc.returncode == 0:
             return True, ""
         return False, (proc.stderr or proc.stdout or "patch failed").strip()

@@ -274,7 +274,7 @@ def main():
         max_lora_rank=128 if args.lora_path else 16,
     )
     lora_req = LoRARequest("alloy_adapter", 1, args.lora_path) if args.lora_path else None
-    sp = SamplingParams(temperature=0.0, max_tokens=2048)
+    sp = SamplingParams(temperature=0.0, max_tokens=3072)
 
     results = []
     t_start = time.time()
