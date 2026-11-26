@@ -1,16 +1,23 @@
-import os
+import subprocess
 from pathlib import Path
+from huggingface_hub import HfApi
 
-print("ALL_ENV_KEY_NAMES:", sorted(os.environ.keys()))
+for cmd in [
+    "df -h",
+    "find /marimo -maxdepth 4 -type f -size +1M 2>/dev/null | head -n 50",
+    "find / -name '*adapter_model*' -o -name '*alloy_round2*' -o -name '*alloy_9b*' -o -name '*phase1_r2*' 2>/dev/null | head -n 50",
+    "ls -la /marimo /marimo/alloy_scripts",
+]:
+    print(f"=== {cmd} ===")
+    r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    print(r.stdout[:3000])
 
-root = Path("/marimo/runs")
-for p in sorted(root.rglob("*")):
-    if p.is_file():
-        print(f"{p} ({p.stat().st_size} bytes)")
-    elif p.is_dir() and not any(p.iterdir()):
-        print(f"{p}/ (EMPTY DIR)")
-
-print("\n--- /marimo/alloy_scripts ---")
-for p in sorted(Path("/marimo/alloy_scripts").rglob("*")):
-    if p.is_file():
-        print(f"{p} ({p.stat().st_size} bytes)")
+api = HfApi()
+try:
+    ds = [d.id for d in api.list_datasets(author="officialmobai")]
+    print("HF_DATASETS:", ds)
+    for d in ds:
+        if "alloy" in d.lower():
+            print(f"DS_FILES {d}:", api.list_repo_files(d, repo_type="dataset"))
+except Exception as e:
+    print("HF_DS_ERR:", e)

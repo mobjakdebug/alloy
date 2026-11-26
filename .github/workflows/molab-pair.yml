@@ -24,6 +24,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check secrets & runner script
+        id: sec
         env:
           MOLAB_URL: ${{ secrets.MOLAB_URL }}
           MOLAB_TOKEN: ${{ secrets.MOLAB_TOKEN }}
@@ -36,9 +37,9 @@ jobs:
             exit 1
           fi
           if [ -n "$HF_TOKEN" ]; then
-            echo "GH_SECRET_HF_TOKEN=true"
+            echo "hf_token_set=true" >> "$GITHUB_OUTPUT"
           else
-            echo "GH_SECRET_HF_TOKEN=false"
+            echo "hf_token_set=false" >> "$GITHUB_OUTPUT"
           fi
           if [ ! -f "$SCRIPT_PATH" ]; then
             echo "::error::Runner script not found: $SCRIPT_PATH"
@@ -80,6 +81,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EXEC_RC: ${{ steps.exec.outputs.exit_code }}
+          HF_SET: ${{ steps.sec.outputs.hf_token_set }}
         run: |
           python3 - <<'PY'
           import os, pathlib, subprocess
@@ -87,7 +89,8 @@ jobs:
           if len(txt) > 60000:
               txt = txt[:30000] + "\n\n... [TRUNCATED] ...\n\n" + txt[-30000:]
           rc = os.environ.get("EXEC_RC", "?")
-          body = f"**Molab Pair Runner** (exit_code={rc})\n\n```text\n{txt}\n```"
+          hf_set = os.environ.get("HF_SET", "?")
+          body = f"**Molab Pair Runner** (exit_code={rc}, gh_hf_token={hf_set})\n\n```text\n{txt}\n```"
           subprocess.run([
               "gh", "api",
               f"repos/{os.environ['GITHUB_REPOSITORY']}/commits/{os.environ['GITHUB_SHA']}/comments",
